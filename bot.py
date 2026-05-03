@@ -1,26 +1,22 @@
-# bot.py - COMPLETE VERSION 1 (BILKUL SAME, NO EXTRA CHANGES)
-# Sirf Render ke liye Chrome path add kiya hai
+# bot_webui.py - Flask Web UI with Auto-Restart & Hard Kill (No Timeout)
 
 import os
 import sys
-import asyncio
-import threading
 import time
 import json
 import random
 import sqlite3
+import threading
 import gc
 import subprocess
-import signal
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
-import logging
 from dataclasses import dataclass
 from collections import deque
+from functools import wraps
 
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext
+from flask import Flask, render_template_string, request, jsonify, session, redirect, url_for
 from cryptography.fernet import Fernet
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -28,24 +24,19 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 
 # ==================== CONFIGURATION ====================
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8724341708:AAGPbkqYn4p0MNvnlPA0_HwD1uruUUQ8q8Y")
-OWNER_FB_LINK = "https://www.facebook.com/profile.php?id=61588381456245"
 SECRET_KEY = "TERI MA KI CHUT MDC"
 CODE = "03102003"
 MAX_TASKS = 1
-PORT = int(os.environ.get("PORT", 10000))
+PORT = int(os.environ.get("PORT", 5000))
+BROWSER_RESTART_HOURS = 6  # Browser restart every 6 hours
 
-# Version 1 ki tarah - koi memory limit nahi, koi extra setting nahi
-BROWSER_RESTART_HOURS = 3  # Version 1 ki tarah 3 hours
+DB_PATH = Path(__file__).parent / 'bot_data.db'
+ENCRYPTION_KEY_FILE = Path(__file__).parent / '.encryption_key'
 
-DB_PATH = Path('/tmp/bot_data.db')  # Sirf ye change (Render ke liye /tmp)
-ENCRYPTION_KEY_FILE = Path('/tmp/.encryption_key')
-
-# Store logs in memory only
+# Logs storage - limited to save memory
 task_logs = {}
 
 def log_message(task_id: str, msg: str):
-    """Log message - memory only, no file writing"""
     timestamp = time.strftime("%H:%M:%S")
     formatted_msg = f"[{timestamp}] {msg}"
     
@@ -65,7 +56,7 @@ def hard_kill_all_chromium(task_id: str = ""):
         subprocess.run(['rm', '-rf', '/dev/shm/.org.chromium*'], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
         time.sleep(2)
         if task_id:
-            log_message(task_id, "ðŸ”ª Hard kill completed - ports freed")
+            log_message(task_id, "🔪 Hard kill completed - ports freed")
     except:
         pass
 
@@ -100,22 +91,20 @@ def decrypt_data(encrypted_data):
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+    cursor.execute('PRAGMA journal_mode=WAL')
     
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            telegram_id TEXT UNIQUE NOT NULL,
-            username TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            secret_key_verified INTEGER DEFAULT 0
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL
         )
     ''')
     
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS tasks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            task_id TEXT UNIQUE NOT NULL,
-            telegram_id TEXT NOT NULL,
+            task_id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
             cookies_encrypted TEXT,
             chat_id TEXT,
             name_prefix TEXT,
@@ -124,24 +113,30 @@ def init_db():
             status TEXT DEFAULT 'stopped',
             messages_sent INTEGER DEFAULT 0,
             rotation_index INTEGER DEFAULT 0,
-            current_cookie_index INTEGER DEFAULT 0,
+            last_browser_restart TIMESTAMP,
             start_time TIMESTAMP,
             last_active TIMESTAMP,
-            last_browser_restart TIMESTAMP,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (telegram_id) REFERENCES users(telegram_id)
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    
+    import hashlib
+    cursor.execute('SELECT * FROM users WHERE username = "admin"')
+    if not cursor.fetchone():
+        password_hash = hashlib.sha256("admin123".encode()).hexdigest()
+        cursor.execute('INSERT INTO users (username, password_hash) VALUES (?, ?)', 
+                      ('admin', password_hash))
     
     conn.commit()
     conn.close()
 
 init_db()
 
+# ==================== TASK CLASS ====================
 @dataclass
 class Task:
     task_id: str
-    telegram_id: str
+    username: str
     cookies: List[str]
     chat_id: str
     name_prefix: str
@@ -149,13 +144,12 @@ class Task:
     delay: int
     status: str
     messages_sent: int
-    rotation_index: int
-    current_cookie_index: int
     start_time: Optional[datetime]
     last_active: Optional[datetime]
     last_browser_restart: Optional[datetime]
     running: bool = False
     stop_flag: bool = False
+    rotation_index: int = 0
     
     def get_uptime(self):
         if not self.start_time:
@@ -169,6 +163,7 @@ class Task:
             return f"{days}d {hours:02d}:{minutes:02d}:{seconds:02d}"
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
+# ==================== TASK MANAGER ====================
 class TaskManager:
     def __init__(self):
         self.tasks: Dict[str, Task] = {}
@@ -179,12 +174,7 @@ class TaskManager:
     def load_tasks_from_db(self):
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute('''
-            SELECT task_id, telegram_id, cookies_encrypted, chat_id, name_prefix, messages, 
-                   delay, status, messages_sent, rotation_index, current_cookie_index, 
-                   start_time, last_active, last_browser_restart
-            FROM tasks
-        ''')
+        cursor.execute('SELECT * FROM tasks')
         for row in cursor.fetchall():
             try:
                 cookies = json.loads(decrypt_data(row[2])) if row[2] else []
@@ -192,7 +182,7 @@ class TaskManager:
                 
                 task = Task(
                     task_id=row[0],
-                    telegram_id=row[1],
+                    username=row[1],
                     cookies=cookies,
                     chat_id=row[3] or "",
                     name_prefix=row[4] or "",
@@ -200,15 +190,16 @@ class TaskManager:
                     delay=row[6] or 30,
                     status=row[7] or "stopped",
                     messages_sent=row[8] or 0,
-                    rotation_index=row[9] or 0,
-                    current_cookie_index=row[10] or 0,
                     start_time=datetime.fromisoformat(row[11]) if row[11] else None,
                     last_active=datetime.fromisoformat(row[12]) if row[12] else None,
-                    last_browser_restart=datetime.fromisoformat(row[13]) if row[13] else None
+                    last_browser_restart=datetime.fromisoformat(row[10]) if row[10] else None,
+                    rotation_index=row[9] or 0
                 )
                 self.tasks[task.task_id] = task
+                if task.status == "running":
+                    self.start_task(task.task_id)
             except Exception as e:
-                print(f"Error loading task {row[0]}: {e}")
+                print(f"Error loading task: {e}")
         conn.close()
     
     def save_task(self, task: Task):
@@ -216,13 +207,12 @@ class TaskManager:
         cursor = conn.cursor()
         cursor.execute('''
             INSERT OR REPLACE INTO tasks 
-            (task_id, telegram_id, cookies_encrypted, chat_id, name_prefix, messages, 
-             delay, status, messages_sent, rotation_index, current_cookie_index, 
-             start_time, last_active, last_browser_restart)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (task_id, username, cookies_encrypted, chat_id, name_prefix, messages, 
+             delay, status, messages_sent, rotation_index, last_browser_restart, start_time, last_active)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             task.task_id,
-            task.telegram_id,
+            task.username,
             encrypt_data(json.dumps(task.cookies)),
             task.chat_id,
             task.name_prefix,
@@ -231,10 +221,9 @@ class TaskManager:
             task.status,
             task.messages_sent,
             task.rotation_index,
-            task.current_cookie_index,
+            task.last_browser_restart.isoformat() if task.last_browser_restart else None,
             task.start_time.isoformat() if task.start_time else None,
-            task.last_active.isoformat() if task.last_active else None,
-            task.last_browser_restart.isoformat() if task.last_browser_restart else None
+            task.last_active.isoformat() if task.last_active else None
         ))
         conn.commit()
         conn.close()
@@ -285,9 +274,26 @@ class TaskManager:
         self.save_task(task)
         return True
     
+    def start_auto_resume(self):
+        """Auto-resume thread - agar task running status mein hai but dead ho, toh restart karega"""
+        def auto_resume():
+            while True:
+                try:
+                    for task_id, task in self.tasks.items():
+                        if task.status == "running" and not task.running:
+                            log_message(task_id, f"🔄 Auto-resuming task...")
+                            hard_kill_all_chromium(task_id)
+                            self.start_task(task_id)
+                except Exception as e:
+                    print(f"Auto resume error: {e}")
+                time.sleep(60)
+        
+        thread = threading.Thread(target=auto_resume, daemon=True)
+        thread.start()
+    
     def _setup_browser(self, task_id: str):
-        """EXACT SAME AS VERSION 1 - Sirf Render ke liye Chrome path add kiya"""
-        # Pehle saare chrome processes kill karo
+        """Setup Chrome browser with hard kill before start - NO TIMEOUT SET"""
+        # Hard kill before starting
         hard_kill_all_chromium(task_id)
         
         chrome_options = Options()
@@ -303,8 +309,8 @@ class TaskManager:
         
         # Memory optimization
         chrome_options.add_argument('--memory-pressure-off')
-        chrome_options.add_argument('--max_old_space_size=256')
-        chrome_options.add_argument('--js-flags="--max-old-space-size=256"')
+        chrome_options.add_argument('--max_old_space_size=128')
+        chrome_options.add_argument('--js-flags="--max-old-space-size=128"')
         
         # Ghost mode
         chrome_options.add_experimental_option('excludeSwitches', ['enable-logging', 'enable-automation'])
@@ -314,7 +320,7 @@ class TaskManager:
         chrome_options.add_argument('--disable-crash-reporter')
         chrome_options.add_argument('--disable-breakpad')
         
-        # Render specific - Chromium binary path (VERSION 1 KI TARAH, SIRF YEH ADD KIYA)
+        # Try to find Chromium binary
         chromium_paths = [
             '/usr/bin/chromium',
             '/usr/bin/chromium-browser',
@@ -329,7 +335,7 @@ class TaskManager:
                 break
         
         try:
-            # Try system chromedriver (VERSION 1 KI TARAH BILKUL SAME)
+            # Try system chromedriver
             chromedriver_paths = [
                 '/usr/bin/chromedriver',
                 '/usr/local/bin/chromedriver'
@@ -341,23 +347,21 @@ class TaskManager:
                     service = Service(executable_path=driver_path, service_log_path='/dev/null')
                     driver = webdriver.Chrome(service=service, options=chrome_options)
                     driver.set_window_size(1280, 720)
-                    driver.set_page_load_timeout(300)
-                    driver.set_script_timeout(300)
+                    # NO TIMEOUT SET - jaisa hai waisa hi
                     driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-                    log_message(task_id, 'âœ… Chrome browser setup completed successfully!')
+                    log_message(task_id, '✅ Chrome browser setup completed successfully!')
                     return driver
             
-            # Fallback to webdriver-manager (VERSION 1 KI TARAH BILKUL SAME)
+            # Fallback to webdriver-manager (NO ChromeType)
             from webdriver_manager.chrome import ChromeDriverManager
             log_message(task_id, 'Trying webdriver-manager...')
             driver_path = ChromeDriverManager().install()
             service = Service(executable_path=driver_path, service_log_path='/dev/null')
             driver = webdriver.Chrome(service=service, options=chrome_options)
             driver.set_window_size(1280, 720)
-            driver.set_page_load_timeout(300)
-            driver.set_script_timeout(300)
+            # NO TIMEOUT SET - jaisa hai waisa hi
             driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-            log_message(task_id, 'âœ… Chrome browser setup completed successfully!')
+            log_message(task_id, '✅ Chrome browser setup completed successfully!')
             return driver
             
         except Exception as error:
@@ -366,7 +370,7 @@ class TaskManager:
             raise error
     
     def _find_message_input(self, driver, task_id: str, process_id: str):
-        """EXACT SAME as original - all 12 selectors"""
+        """Find message input box in Facebook - 12 selectors"""
         log_message(task_id, f"{process_id}: Finding message input...")
         
         try:
@@ -414,7 +418,7 @@ class TaskManager:
                             
                             keywords = ['message', 'write', 'type', 'send', 'chat', 'msg', 'reply', 'text', 'aa']
                             if any(keyword in element_text for keyword in keywords):
-                                log_message(task_id, f"{process_id}: âœ… Found message input")
+                                log_message(task_id, f"{process_id}: ✅ Found message input")
                                 return element
                             elif idx < 10:
                                 log_message(task_id, f"{process_id}: Using primary selector editable element")
@@ -427,11 +431,11 @@ class TaskManager:
             except Exception:
                 continue
         
-        log_message(task_id, f"{process_id}: âŒ Message input not found!")
+        log_message(task_id, f"{process_id}: ❌ Message input not found!")
         return None
     
     def _login_and_navigate(self, driver, task: Task, task_id: str, process_id: str):
-        """Login to Facebook and navigate to chat - EXACT SAME"""
+        """Login to Facebook and navigate to chat - with retry"""
         log_message(task_id, f"{process_id}: Navigating to Facebook...")
         driver.get('https://www.facebook.com/')
         time.sleep(8)
@@ -472,7 +476,7 @@ class TaskManager:
         return message_input
     
     def _send_single_message(self, driver, message_input, task: Task, task_id: str, process_id: str):
-        """Send a single message - EXACT SAME"""
+        """Send a single message - with 3 Enter events (Version 1 style)"""
         messages_list = [msg.strip() for msg in task.messages if msg.strip()]
         if not messages_list:
             messages_list = ['Hello!']
@@ -507,18 +511,28 @@ class TaskManager:
             
             # Try to find and click send button
             sent = driver.execute_script("""
-                const sendButtons = document.querySelectorAll('[aria-label*="Send" i]:not([aria-label*="like" i]), [data-testid="send-button"]');
+                const sendSelectors = [
+                    '[aria-label*="Send" i]:not([aria-label*="like" i])',
+                    '[data-testid="send-button"]',
+                    '[aria-label*="Envoyer" i]',
+                    'button[type="submit"]',
+                    'div[role="button"][aria-label*="Send" i]'
+                ];
                 
-                for (let btn of sendButtons) {
-                    if (btn.offsetParent !== null) {
-                        btn.click();
-                        return 'button_clicked';
+                for (const selector of sendSelectors) {
+                    const btns = document.querySelectorAll(selector);
+                    for (let btn of btns) {
+                        if (btn.offsetParent !== null) {
+                            btn.click();
+                            return 'button_clicked';
+                        }
                     }
                 }
                 return 'button_not_found';
             """)
             
             if sent == 'button_not_found':
+                # 3 Enter events - FULL Version 1 style
                 driver.execute_script("""
                     const element = arguments[0];
                     element.focus();
@@ -531,9 +545,9 @@ class TaskManager:
                     
                     events.forEach(event => element.dispatchEvent(event));
                 """, message_input)
-                log_message(task_id, f"{process_id}: âœ… Sent via Enter")
+                log_message(task_id, f"{process_id}: ✅ Sent via Enter (3 events)")
             else:
-                log_message(task_id, f"{process_id}: âœ… Sent via button")
+                log_message(task_id, f"{process_id}: ✅ Sent via button")
             
             # Update counters
             task.messages_sent += 1
@@ -541,8 +555,7 @@ class TaskManager:
             task.last_active = datetime.now()
             self.save_task(task)
             
-            log_message(task_id, f"{process_id}: Message #{task.messages_sent} sent. Rotation: {task.rotation_index}")
-            
+            log_message(task_id, f"{process_id}: Message #{task.messages_sent} sent. Rotation index: {task.rotation_index}")
             return True
             
         except Exception as send_error:
@@ -550,7 +563,7 @@ class TaskManager:
             return False
     
     def _run_task(self, task_id: str):
-        """EXACT SAME AS VERSION 1 - NO CHANGES"""
+        """Main task runner with browser restart every 12 hours and auto-recovery"""
         task = self.tasks[task_id]
         task.running = True
         process_id = f"TASK-{task_id[-6:]}"
@@ -561,7 +574,7 @@ class TaskManager:
         
         while task.status == "running" and not task.stop_flag:
             try:
-                # Check if browser restart needed
+                # Check if browser restart needed (every 12 hours)
                 current_time = datetime.now()
                 last_restart = task.last_browser_restart
                 
@@ -571,7 +584,8 @@ class TaskManager:
                     hours_since_restart = BROWSER_RESTART_HOURS + 1
                 
                 if hours_since_restart >= BROWSER_RESTART_HOURS or driver is None:
-                    log_message(task_id, f"{process_id}: ðŸ”„ Browser restart after {hours_since_restart:.1f} hours...")
+                    log_message(task_id, f"{process_id}: 🔄 Browser restart after {hours_since_restart:.1f} hours...")
+                    log_message(task_id, f"{process_id}: 📍 Resuming from message #{task.messages_sent + 1} (rotation index: {task.rotation_index})")
                     
                     # Close old browser if exists
                     if driver:
@@ -598,7 +612,7 @@ class TaskManager:
                             time.sleep(5)
                     
                     if not new_driver:
-                        log_message(task_id, f"{process_id}: âŒ Failed to setup browser!")
+                        log_message(task_id, f"{process_id}: ❌ Failed to setup browser!")
                         time.sleep(30)
                         continue
                     
@@ -613,7 +627,7 @@ class TaskManager:
                         time.sleep(5)
                     
                     if not message_input:
-                        log_message(task_id, f"{process_id}: âŒ Failed to find message input!")
+                        log_message(task_id, f"{process_id}: ❌ Failed to find message input!")
                         driver = None
                         hard_kill_all_chromium(task_id)
                         time.sleep(15)
@@ -623,8 +637,7 @@ class TaskManager:
                     task.last_browser_restart = datetime.now()
                     self.save_task(task)
                     
-                    log_message(task_id, f"{process_id}: âœ… Browser ready! Resuming from message #{task.messages_sent + 1} (rotation index: {task.rotation_index})")
-                    
+                    log_message(task_id, f"{process_id}: ✅ Browser ready! Continuing from message #{task.messages_sent + 1} (rotation index: {task.rotation_index})")
                     consecutive_failures = 0
                     time.sleep(3)
                 
@@ -659,9 +672,8 @@ class TaskManager:
                         consecutive_failures = 0
                     time.sleep(10)
                 
-                # Memory cleanup every 50 messages (VERSION 1 KI TARAH)
+                # Memory cleanup every 50 messages
                 if task.messages_sent % 50 == 0 and task.messages_sent > 0:
-                    log_message(task_id, f"{process_id}: ðŸ§¹ Memory cleanup...")
                     try:
                         driver.execute_script("""
                             try {
@@ -671,6 +683,7 @@ class TaskManager:
                             } catch(e) { }
                         """)
                         gc.collect()
+                        log_message(task_id, f"{process_id}: 🧹 Memory cleanup done")
                     except:
                         pass
                 
@@ -684,495 +697,516 @@ class TaskManager:
         if driver:
             try:
                 driver.quit()
+                log_message(task_id, f"{process_id}: Browser closed")
             except:
                 pass
+        
         hard_kill_all_chromium(task_id)
         task.running = False
         if task_id in self.task_threads:
             del self.task_threads[task_id]
-    
-    def start_auto_resume(self):
-        def auto_resume():
-            while True:
-                try:
-                    for task_id, task in self.tasks.items():
-                        if task.status == "running" and not task.running:
-                            log_message(task_id, f"ðŸ”„ Auto-resuming task...")
-                            hard_kill_all_chromium(task_id)
-                            self.start_task(task_id)
-                except Exception as e:
-                    print(f"Auto resume error: {e}")
-                time.sleep(60)
-        
-        thread = threading.Thread(target=auto_resume, daemon=True)
-        thread.start()
 
 task_manager = TaskManager()
 
-# ==================== TELEGRAM BOT HANDLERS ====================
-def verify_user(telegram_id: str, secret_key: str = None) -> bool:
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    if secret_key:
-        if secret_key == SECRET_KEY:
-            cursor.execute('INSERT OR REPLACE INTO users (telegram_id, secret_key_verified) VALUES (?, ?)', (telegram_id, 1))
-            conn.commit()
-            conn.close()
-            return True
-        return False
-    
-    cursor.execute('SELECT secret_key_verified FROM users WHERE telegram_id = ?', (telegram_id,))
-    result = cursor.fetchone()
-    conn.close()
-    return result and result[0] == 1
+# ==================== FLASK WEB UI ====================
+app = Flask(__name__)
+app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'your-secret-key-here')
 
-async def start_command(update: Update, context: CallbackContext):
-    user_id = str(update.effective_user.id)
-    if verify_user(user_id):
-        await show_menu(update, context)
-    else:
-        await update.message.reply_text(
-            f"Welcome to Raj Mishra end to end world\n\n"
-            f"Please contact my owner: {OWNER_FB_LINK}\n\n"
-            f"To get the secret key to start\n\n"
-            f"Send the secret key to continue:"
-        )
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'logged_in' not in session:
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
 
-async def handle_secret_key(update: Update, context: CallbackContext):
-    user_id = str(update.effective_user.id)
-    secret = update.message.text.strip()
-    
-    if verify_user(user_id, secret):
-        await update.message.reply_text(
-            "Welcome to New world\n\n"
-            "Please choose option:\n\n"
-            "A. Send cookies (one per line for multiple cookies)\n"
-            "B. Send chat thread ID\n"
-            "C. Send messages file (.txt)\n"
-            "D. Send name prefix\n"
-            "E. Send time delay\n"
-            "F. Send code to start task\n"
-            "G. Manage tasks\n\n"
-            "Send the option letter to proceed:"
-        )
-        context.user_data['verified'] = True
-        context.user_data['setup_step'] = 'awaiting_option'
-    else:
-        await update.message.reply_text(f"Code galat hai! Please visit my owner: {OWNER_FB_LINK}")
-
-async def handle_option(update: Update, context: CallbackContext):
-    option = update.message.text.strip().upper()
-    
-    if option == 'A':
-        context.user_data['setup_step'] = 'awaiting_cookies'
-        await update.message.reply_text(
-            "Send your Facebook cookies (one per line for multiple cookies):\n\n"
-            "Example for single cookie:\n"
-            "c_user=1234567890; xs=789012%3Aabc123; datr=abc123\n\n"
-            "Example for multiple cookies:\n"
-            "c_user=111; xs=111; datr=111\n"
-            "c_user=222; xs=222; datr=222\n"
-            "c_user=333; xs=333; datr=333"
-        )
-    
-    elif option == 'B':
-        context.user_data['setup_step'] = 'awaiting_chat_id'
-        await update.message.reply_text("Send chat thread ID:\n\nExample: 1362400298935018")
-    
-    elif option == 'C':
-        context.user_data['setup_step'] = 'awaiting_messages'
-        await update.message.reply_text("Send your messages file (.txt) with one message per line:")
-    
-    elif option == 'D':
-        context.user_data['setup_step'] = 'awaiting_name_prefix'
-        await update.message.reply_text("Send the name prefix:")
-    
-    elif option == 'E':
-        context.user_data['setup_step'] = 'awaiting_delay'
-        await update.message.reply_text("Send the time delay (in seconds):")
-    
-    elif option == 'F':
-        context.user_data['setup_step'] = 'awaiting_code'
-        await update.message.reply_text("Send the code to start the task:")
-    
-    elif option == 'G':
-        context.user_data['setup_step'] = 'awaiting_task_action'
-        await update.message.reply_text(
-            "Send task ID to manage:\n\n"
-            "Commands:\n"
-            "/stop TASK_ID - Stop task\n"
-            "/resume TASK_ID - Resume task\n"
-            "/status TASK_ID - Check status\n"
-            "/delete TASK_ID - Delete task\n"
-            "/uptime TASK_ID - Check uptime\n"
-            "/logs TASK_ID - Show logs\n"
-            "/tasks - List all your tasks"
-        )
-    
-    else:
-        await update.message.reply_text("Invalid option! Please choose A, B, C, D, E, F, or G")
-
-async def handle_cookies(update: Update, context: CallbackContext):
-    text = update.message.text.strip()
-    cookies = [c.strip() for c in text.split('\n') if c.strip()]
-    
-    if 'config' not in context.user_data:
-        context.user_data['config'] = {}
-    context.user_data['config']['cookies'] = cookies
-    
-    await update.message.reply_text(f"âœ… {len(cookies)} cookie(s) saved!")
-    context.user_data['setup_step'] = 'awaiting_option'
-    await show_menu(update, context)
-
-async def handle_chat_id(update: Update, context: CallbackContext):
-    chat_id = update.message.text.strip()
-    context.user_data['config']['chat_id'] = chat_id
-    await update.message.reply_text(f"âœ… Chat ID saved!")
-    context.user_data['setup_step'] = 'awaiting_option'
-    await show_menu(update, context)
-
-async def handle_messages(update: Update, context: CallbackContext):
-    if update.message.document:
-        file = await update.message.document.get_file()
-        file_content = await file.download_as_bytearray()
-        messages = file_content.decode('utf-8').strip().split('\n')
-        messages = [m.strip() for m in messages if m.strip()]
+# HTML Template
+HTML_TEMPLATE = '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Facebook Message Bot - Control Panel</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container { max-width: 1400px; margin: 0 auto; }
+        .header {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .header h1 { color: #667eea; font-size: 24px; }
+        .logout-btn {
+            background: #dc3545;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            text-decoration: none;
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        .stat-card {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            text-align: center;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .stat-card h3 { color: #666; font-size: 14px; margin-bottom: 10px; }
+        .stat-card .value { font-size: 32px; font-weight: bold; color: #667eea; }
+        .main-content {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        .card {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .card h2 {
+            color: #333;
+            margin-bottom: 20px;
+            font-size: 20px;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 10px;
+        }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; color: #666; font-weight: 500; }
+        input, textarea, select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+        textarea { resize: vertical; min-height: 100px; }
+        button {
+            background: #667eea;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-right: 10px;
+        }
+        button:hover { background: #5a67d8; }
+        button.danger { background: #dc3545; }
+        button.success { background: #28a745; }
+        button.warning { background: #ffc107; color: #333; }
+        .task-list { margin-top: 20px; max-height: 500px; overflow-y: auto; }
+        .task-item {
+            background: #f8f9fa;
+            border-radius: 5px;
+            padding: 15px;
+            margin-bottom: 10px;
+            border-left: 4px solid #667eea;
+            cursor: pointer;
+        }
+        .task-item.running { border-left-color: #28a745; }
+        .task-item.stopped { border-left-color: #dc3545; }
+        .task-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .task-id { font-weight: bold; color: #333; }
+        .task-status {
+            padding: 3px 10px;
+            border-radius: 3px;
+            font-size: 12px;
+            font-weight: bold;
+        }
+        .status-running { background: #d4edda; color: #155724; }
+        .status-stopped { background: #f8d7da; color: #721c24; }
+        .task-details { font-size: 12px; color: #666; margin-bottom: 10px; }
+        .task-actions button { padding: 5px 10px; font-size: 12px; margin-right: 5px; }
+        .logs {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            border-radius: 5px;
+            padding: 15px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            height: 400px;
+            overflow-y: auto;
+        }
+        .log-line { margin-bottom: 5px; white-space: pre-wrap; word-wrap: break-word; }
+        .log-error { color: #f48771; }
+        .refresh-btn { float: right; padding: 5px 10px; font-size: 12px; }
+        @media (max-width: 768px) { .main-content { grid-template-columns: 1fr; } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🤖 Facebook Message Bot</h1>
+            <a href="/logout" class="logout-btn">Logout</a>
+        </div>
         
-        context.user_data['config']['messages'] = messages
-        await update.message.reply_text(f"âœ… {len(messages)} message(s) loaded!")
-        context.user_data['setup_step'] = 'awaiting_option'
-        await show_menu(update, context)
-    else:
-        await update.message.reply_text("Please send the messages as a .txt file!")
+        <div class="stats">
+            <div class="stat-card"><h3>Total Tasks</h3><div class="value" id="totalTasks">0</div></div>
+            <div class="stat-card"><h3>Running Tasks</h3><div class="value" id="runningTasks">0</div></div>
+            <div class="stat-card"><h3>Stopped Tasks</h3><div class="value" id="stoppedTasks">0</div></div>
+            <div class="stat-card"><h3>Total Messages</h3><div class="value" id="totalMessages">0</div></div>
+        </div>
+        
+        <div class="main-content">
+            <div class="card">
+                <h2>➕ Create New Task</h2>
+                <form id="createTaskForm">
+                    <div class="form-group">
+                        <label>Chat Thread ID</label>
+                        <input type="text" name="chat_id" required placeholder="e.g., 1362400298935018">
+                    </div>
+                    <div class="form-group">
+                        <label>Name Prefix (optional)</label>
+                        <input type="text" name="name_prefix" placeholder="e.g., John">
+                    </div>
+                    <div class="form-group">
+                        <label>Messages (one per line)</label>
+                        <textarea name="messages" required placeholder="Hello!&#10;How are you?&#10;Nice to meet you!"></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label>Delay (seconds) - Recommended: 60+ seconds for stability</label>
+                        <input type="number" name="delay" value="60" min="30">
+                    </div>
+                    <div class="form-group">
+                        <label>Facebook Cookies</label>
+                        <textarea name="cookies" required placeholder="c_user=1234567890; xs=789012%3Aabc123; datr=abc123"></textarea>
+                    </div>
+                    <button type="submit">Create & Start Task</button>
+                </form>
+            </div>
+            
+            <div class="card">
+                <h2>📋 Tasks</h2>
+                <div id="tasksList" class="task-list">Loading...</div>
+            </div>
+        </div>
+        
+        <div class="card">
+            <h2>📄 Task Logs <button class="refresh-btn" onclick="refreshLogs()">Refresh</button></h2>
+            <div class="logs" id="logsContainer"><div class="log-line">Select a task to view logs...</div></div>
+        </div>
+    </div>
+    
+    <script>
+        let currentTaskId = null;
+        
+        function loadStats() {
+            fetch('/api/stats').then(res => res.json()).then(data => {
+                document.getElementById('totalTasks').textContent = data.total_tasks;
+                document.getElementById('runningTasks').textContent = data.running_tasks;
+                document.getElementById('stoppedTasks').textContent = data.stopped_tasks;
+                document.getElementById('totalMessages').textContent = data.total_messages;
+            });
+        }
+        
+        function loadTasks() {
+            fetch('/api/tasks').then(res => res.json()).then(tasks => {
+                const container = document.getElementById('tasksList');
+                if (tasks.length === 0) {
+                    container.innerHTML = '<p style="text-align: center; color: #666;">No tasks created yet</p>';
+                    return;
+                }
+                container.innerHTML = tasks.map(task => `
+                    <div class="task-item ${task.status}" onclick="selectTask('${task.task_id}')">
+                        <div class="task-header">
+                            <span class="task-id">${task.task_id}</span>
+                            <span class="task-status status-${task.status}">${task.status.toUpperCase()}</span>
+                        </div>
+                        <div class="task-details">
+                            Chat: ${task.chat_id} | Sent: ${task.messages_sent} msgs | Uptime: ${task.uptime} | Delay: ${task.delay}s
+                        </div>
+                        <div class="task-actions" onclick="event.stopPropagation()">
+                            ${task.status === 'running' ? 
+                                `<button class="warning" onclick="stopTask('${task.task_id}')">⏸ Stop</button>` :
+                                `<button class="success" onclick="startTask('${task.task_id}')">▶ Start</button>`
+                            }
+                            <button class="danger" onclick="deleteTask('${task.task_id}')">🗑 Delete</button>
+                        </div>
+                    </div>
+                `).join('');
+            });
+        }
+        
+        function selectTask(taskId) { currentTaskId = taskId; refreshLogs(); }
+        
+        function refreshLogs() {
+            if (!currentTaskId) return;
+            fetch(`/api/logs/${currentTaskId}`).then(res => res.json()).then(data => {
+                const container = document.getElementById('logsContainer');
+                if (data.logs.length === 0) {
+                    container.innerHTML = '<div class="log-line">No logs available</div>';
+                    return;
+                }
+                container.innerHTML = data.logs.map(log => {
+                    const isError = log.includes('ERROR') || log.includes('Failed') || log.includes('Error');
+                    return `<div class="log-line ${isError ? 'log-error' : ''}">${escapeHtml(log)}</div>`;
+                }).join('');
+                container.scrollTop = container.scrollHeight;
+            });
+        }
+        
+        function startTask(taskId) { fetch(`/api/tasks/${taskId}/start`, { method: 'POST' }).then(() => { loadTasks(); loadStats(); }); }
+        function stopTask(taskId) { fetch(`/api/tasks/${taskId}/stop`, { method: 'POST' }).then(() => { loadTasks(); loadStats(); }); }
+        
+        function deleteTask(taskId) {
+            if (confirm('Delete this task?')) {
+                fetch(`/api/tasks/${taskId}`, { method: 'DELETE' }).then(() => {
+                    if (currentTaskId === taskId) { currentTaskId = null; document.getElementById('logsContainer').innerHTML = '<div class="log-line">Select a task to view logs...</div>'; }
+                    loadTasks(); loadStats();
+                });
+            }
+        }
+        
+        function escapeHtml(text) { const div = document.createElement('div'); div.textContent = text; return div.innerHTML; }
+        
+        document.getElementById('createTaskForm').addEventListener('submit', (e) => {
+            e.preventDefault();
+            const formData = new FormData(e.target);
+            const data = {
+                chat_id: formData.get('chat_id'),
+                name_prefix: formData.get('name_prefix'),
+                messages: formData.get('messages').split('\\n').filter(m => m.trim()),
+                delay: parseInt(formData.get('delay')),
+                cookies: formData.get('cookies')
+            };
+            fetch('/api/tasks/create', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            }).then(res => res.json()).then(result => {
+                if (result.success) { alert('Task created!'); e.target.reset(); loadTasks(); loadStats(); }
+                else { alert('Error: ' + result.error); }
+            });
+        });
+        
+        setInterval(() => { loadStats(); loadTasks(); if (currentTaskId) refreshLogs(); }, 3000);
+        loadStats(); loadTasks();
+    </script>
+</body>
+</html>
+'''
 
-async def handle_name_prefix(update: Update, context: CallbackContext):
-    context.user_data['config']['name_prefix'] = update.message.text.strip()
-    await update.message.reply_text("âœ… Name prefix saved!")
-    context.user_data['setup_step'] = 'awaiting_option'
-    await show_menu(update, context)
+LOGIN_TEMPLATE = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Login - Facebook Bot</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        .login-container {
+            background: white;
+            border-radius: 10px;
+            padding: 40px;
+            width: 350px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+        }
+        h1 { color: #667eea; text-align: center; margin-bottom: 30px; }
+        input { width: 100%; padding: 12px; margin-bottom: 15px; border: 1px solid #ddd; border-radius: 5px; }
+        button { width: 100%; padding: 12px; background: #667eea; color: white; border: none; border-radius: 5px; cursor: pointer; }
+        button:hover { background: #5a67d8; }
+        .error { color: #dc3545; text-align: center; margin-top: 10px; }
+        .info { text-align: center; margin-top: 20px; font-size: 12px; color: #666; }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <h1>🤖 Bot Login</h1>
+        <form method="POST">
+            <input type="text" name="username" placeholder="Username" required>
+            <input type="password" name="password" placeholder="Password" required>
+            <button type="submit">Login</button>
+            {% if error %}<div class="error">{{ error }}</div>{% endif %}
+        </form>
+        <div class="info">Default: admin / admin123</div>
+    </div>
+</body>
+</html>
+'''
 
-async def handle_delay(update: Update, context: CallbackContext):
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        import hashlib
+        username = request.form.get('username')
+        password = request.form.get('password')
+        password_hash = hashlib.sha256(password.encode()).hexdigest()
+        
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM users WHERE username = ? AND password_hash = ?', (username, password_hash))
+        user = cursor.fetchone()
+        conn.close()
+        
+        if user:
+            session['logged_in'] = True
+            session['username'] = username
+            return redirect(url_for('index'))
+        else:
+            return render_template_string(LOGIN_TEMPLATE, error='Invalid credentials')
+    
+    return render_template_string(LOGIN_TEMPLATE)
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('login'))
+
+@app.route('/')
+@login_required
+def index():
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/api/stats')
+@login_required
+def api_stats():
+    tasks = task_manager.tasks.values()
+    username = session.get('username')
+    user_tasks = [t for t in tasks if t.username == username]
+    return jsonify({
+        'total_tasks': len(user_tasks),
+        'running_tasks': sum(1 for t in user_tasks if t.status == 'running'),
+        'stopped_tasks': sum(1 for t in user_tasks if t.status == 'stopped'),
+        'total_messages': sum(t.messages_sent for t in user_tasks)
+    })
+
+@app.route('/api/tasks')
+@login_required
+def api_tasks():
+    username = session.get('username')
+    tasks = [t for t in task_manager.tasks.values() if t.username == username]
+    return jsonify([{
+        'task_id': t.task_id,
+        'status': t.status,
+        'chat_id': t.chat_id,
+        'messages_sent': t.messages_sent,
+        'uptime': t.get_uptime(),
+        'delay': t.delay
+    } for t in tasks])
+
+@app.route('/api/tasks/create', methods=['POST'])
+@login_required
+def api_create_task():
+    data = request.json
+    username = session.get('username')
+    
     try:
-        delay = int(update.message.text.strip())
-        context.user_data['config']['delay'] = delay
-        await update.message.reply_text(f"âœ… Delay set to {delay} seconds!")
-        context.user_data['setup_step'] = 'awaiting_option'
-        await show_menu(update, context)
-    except:
-        await update.message.reply_text("Invalid number! Please send a valid number.")
-
-async def handle_code(update: Update, context: CallbackContext):
-    user_id = str(update.effective_user.id)
-    code = update.message.text.strip()
-    
-    if code == CODE:
-        config = context.user_data.get('config', {})
-        
-        required = ['cookies', 'chat_id', 'messages', 'name_prefix', 'delay']
-        if not all(k in config for k in required):
-            await update.message.reply_text("Please complete all setup steps (A-E) before sending the code!")
-            return
-        
-        task_id = f"rajmishra_{random.randint(10000, 99999)}"
+        task_id = f"task_{random.randint(10000, 99999)}"
+        cookies = [data.get('cookies', '')]
+        messages = data.get('messages', ['Hello!'])
         
         task = Task(
             task_id=task_id,
-            telegram_id=user_id,
-            cookies=config['cookies'],
-            chat_id=config['chat_id'],
-            name_prefix=config['name_prefix'],
-            messages=config['messages'],
-            delay=config['delay'],
-            status="stopped",
+            username=username,
+            cookies=cookies,
+            chat_id=data.get('chat_id', ''),
+            name_prefix=data.get('name_prefix', ''),
+            messages=messages,
+            delay=int(data.get('delay', 30)),
+            status='stopped',
             messages_sent=0,
-            rotation_index=0,
-            current_cookie_index=0,
             start_time=None,
             last_active=None,
-            last_browser_restart=None
+            last_browser_restart=None,
+            rotation_index=0
         )
         
         task_manager.tasks[task_id] = task
         task_manager.save_task(task)
         task_manager.start_task(task_id)
         
-        await update.message.reply_text(
-            f"âœ… Task started!\n\n"
-            f"Task ID: {task_id}\n"
-            f"Cookies: {len(config['cookies'])} cookie(s)\n"
-            f"Browser Restart: Every {BROWSER_RESTART_HOURS} hours\n"
-            f"Status: Running\n"
-            f"Use /logs {task_id} to see live console output\n"
-            f"Use /status {task_id} to check progress"
-        )
-        
-        context.user_data['config'] = {}
-        context.user_data['setup_step'] = 'awaiting_option'
-        await show_menu(update, context)
-    else:
-        await update.message.reply_text(f"âŒ Code galat hai! Please visit my owner: {OWNER_FB_LINK}")
+        return jsonify({'success': True, 'task_id': task_id})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
 
-async def show_menu(update: Update, context: CallbackContext):
-    menu = (
-        "ðŸ“‹ Main Menu:\n\n"
-        "A. Send cookies (one per line)\n"
-        "B. Send chat thread ID\n"
-        "C. Send messages file\n"
-        "D. Send name prefix\n"
-        "E. Send time delay\n"
-        "F. Send code to start task\n"
-        "G. Manage tasks\n\n"
-        "Send the option letter to proceed:"
-    )
-    await update.message.reply_text(menu)
-
-async def stop_task_command(update: Update, context: CallbackContext):
-    if not context.args:
-        await update.message.reply_text("Please provide task ID: /stop TASK_ID")
-        return
-    
-    task_id = context.args[0]
-    user_id = str(update.effective_user.id)
-    
+@app.route('/api/tasks/<task_id>/start', methods=['POST'])
+@login_required
+def api_start_task(task_id):
     if task_id not in task_manager.tasks:
-        await update.message.reply_text("Task not found!")
-        return
-    
-    if task_manager.tasks[task_id].telegram_id != user_id:
-        await update.message.reply_text("You don't own this task!")
-        return
-    
-    if task_manager.stop_task(task_id):
-        await update.message.reply_text(f"âœ… Task {task_id} stopped!")
-
-async def resume_task_command(update: Update, context: CallbackContext):
-    if not context.args:
-        await update.message.reply_text("Please provide task ID: /resume TASK_ID")
-        return
-    
-    task_id = context.args[0]
-    user_id = str(update.effective_user.id)
-    
-    if task_id not in task_manager.tasks:
-        await update.message.reply_text("Task not found!")
-        return
-    
-    if task_manager.tasks[task_id].telegram_id != user_id:
-        await update.message.reply_text("You don't own this task!")
-        return
-    
+        return jsonify({'error': 'Task not found'}), 404
+    if task_manager.tasks[task_id].username != session.get('username'):
+        return jsonify({'error': 'Unauthorized'}), 403
     if task_manager.start_task(task_id):
-        await update.message.reply_text(f"âœ… Task {task_id} resumed!")
+        return jsonify({'success': True})
+    return jsonify({'error': 'Failed to start'}), 400
 
-async def status_task_command(update: Update, context: CallbackContext):
-    if not context.args:
-        await update.message.reply_text("Please provide task ID: /status TASK_ID")
-        return
-    
-    task_id = context.args[0]
-    user_id = str(update.effective_user.id)
-    
+@app.route('/api/tasks/<task_id>/stop', methods=['POST'])
+@login_required
+def api_stop_task(task_id):
     if task_id not in task_manager.tasks:
-        await update.message.reply_text("Task not found!")
-        return
-    
-    task = task_manager.tasks[task_id]
-    if task.telegram_id != user_id:
-        await update.message.reply_text("You don't own this task!")
-        return
-    
-    next_restart = ""
-    if task.last_browser_restart:
-        time_since = (datetime.now() - task.last_browser_restart).total_seconds() / 3600
-        remaining = BROWSER_RESTART_HOURS - time_since
-        if remaining > 0:
-            next_restart = f"\nNext restart: {remaining:.1f} hours"
-    
-    status_text = (
-        f"ðŸ“Š Task: {task_id}\n\n"
-        f"Status: {task.status}\n"
-        f"Messages Sent: {task.messages_sent}\n"
-        f"Rotation Index: {task.rotation_index}\n"
-        f"Cookies: {len(task.cookies)}\n"
-        f"Chat ID: {task.chat_id}\n"
-        f"Name Prefix: {task.name_prefix}\n"
-        f"Messages: {len(task.messages)}\n"
-        f"Delay: {task.delay}s\n"
-        f"Uptime: {task.get_uptime()}{next_restart}"
-    )
-    await update.message.reply_text(status_text)
+        return jsonify({'error': 'Task not found'}), 404
+    if task_manager.tasks[task_id].username != session.get('username'):
+        return jsonify({'error': 'Unauthorized'}), 403
+    if task_manager.stop_task(task_id):
+        return jsonify({'success': True})
+    return jsonify({'error': 'Failed to stop'}), 400
 
-async def delete_task_command(update: Update, context: CallbackContext):
-    if not context.args:
-        await update.message.reply_text("Please provide task ID: /delete TASK_ID")
-        return
-    
-    task_id = context.args[0]
-    user_id = str(update.effective_user.id)
-    
+@app.route('/api/tasks/<task_id>', methods=['DELETE'])
+@login_required
+def api_delete_task(task_id):
     if task_id not in task_manager.tasks:
-        await update.message.reply_text("Task not found!")
-        return
-    
-    if task_manager.tasks[task_id].telegram_id != user_id:
-        await update.message.reply_text("You don't own this task!")
-        return
-    
+        return jsonify({'error': 'Task not found'}), 404
+    if task_manager.tasks[task_id].username != session.get('username'):
+        return jsonify({'error': 'Unauthorized'}), 403
     if task_manager.delete_task(task_id):
-        await update.message.reply_text(f"âœ… Task {task_id} deleted!")
+        return jsonify({'success': True})
+    return jsonify({'error': 'Failed to delete'}), 400
 
-async def uptime_task_command(update: Update, context: CallbackContext):
-    if not context.args:
-        await update.message.reply_text("Please provide task ID: /uptime TASK_ID")
-        return
-    
-    task_id = context.args[0]
-    user_id = str(update.effective_user.id)
-    
+@app.route('/api/logs/<task_id>')
+@login_required
+def api_logs(task_id):
     if task_id not in task_manager.tasks:
-        await update.message.reply_text("Task not found!")
-        return
-    
-    task = task_manager.tasks[task_id]
-    if task.telegram_id != user_id:
-        await update.message.reply_text("You don't own this task!")
-        return
-    
-    await update.message.reply_text(f"â±ï¸ Task {task_id} uptime: {task.get_uptime()}")
+        return jsonify({'logs': []})
+    if task_manager.tasks[task_id].username != session.get('username'):
+        return jsonify({'logs': []})
+    logs = list(task_logs.get(task_id, []))
+    return jsonify({'logs': logs[-100:]})
 
-async def logs_command(update: Update, context: CallbackContext):
-    if not context.args:
-        await update.message.reply_text("Please provide task ID: /logs TASK_ID")
-        return
-    
-    task_id = context.args[0]
-    user_id = str(update.effective_user.id)
-    
-    if task_id not in task_manager.tasks:
-        await update.message.reply_text("Task not found!")
-        return
-    
-    task = task_manager.tasks[task_id]
-    if task.telegram_id != user_id:
-        await update.message.reply_text("You don't own this task!")
-        return
-    
-    logs = task_logs.get(task_id, [])
-    
-    if not logs:
-        await update.message.reply_text("No logs available yet. Task may not have started or no activity.")
-        return
-    
-    logs_text = "ðŸ“º LIVE CONSOLE OUTPUT (Last 30):\n\n"
-    logs_text += "â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”\n"
-    
-    for log in list(logs)[-30:]:
-        log_clean = log[:70] if len(log) > 70 else log
-        logs_text += f"â”‚ {log_clean:<68} â”‚\n"
-    
-    logs_text += "â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜\n"
-    logs_text += f"\nðŸ“ˆ Total Messages Sent: {task.messages_sent}\n"
-    logs_text += f"ðŸ”„ Message Rotation Index: {task.rotation_index}\n"
-    logs_text += f"â±ï¸ Uptime: {task.get_uptime()}\n"
-    logs_text += f"ðŸ”„ Browser Restart: Every {BROWSER_RESTART_HOURS} hours"
-    
-    if len(logs_text) > 4000:
-        part1 = logs_text[:3500] + "\n\n... (more logs below) ..."
-        part2 = logs_text[3500:]
-        await update.message.reply_text(part1)
-        await update.message.reply_text(part2)
-    else:
-        await update.message.reply_text(logs_text)
+@app.route('/health')
+def health():
+    return jsonify({'status': 'alive', 'tasks': len(task_manager.tasks)})
 
-async def list_tasks_command(update: Update, context: CallbackContext):
-    user_id = str(update.effective_user.id)
-    user_tasks = [t for t in task_manager.tasks.values() if t.telegram_id == user_id]
-    
-    if not user_tasks:
-        await update.message.reply_text("No tasks found!")
-        return
-    
-    tasks_list = "ðŸ“‹ Your Tasks:\n\n"
-    for task in user_tasks:
-        tasks_list += f"ID: {task.task_id}\n"
-        tasks_list += f"Status: {task.status}\n"
-        tasks_list += f"Cookies: {len(task.cookies)}\n"
-        tasks_list += f"Sent: {task.messages_sent}\n"
-        tasks_list += f"Uptime: {task.get_uptime()}\n"
-        tasks_list += "---\n"
-    
-    await update.message.reply_text(tasks_list)
-
-# Health check server for Render
-def health_check():
-    import socket
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(('0.0.0.0', PORT))
-    sock.listen(5)
-    while True:
-        try:
-            client, _ = sock.accept()
-            client.send(b"HTTP/1.1 200 OK\r\n\r\nOK")
-            client.close()
-        except:
-            pass
-
-async def handle_message(update: Update, context: CallbackContext):
-    user_id = str(update.effective_user.id)
-    text = update.message.text.strip()
-    
-    if not verify_user(user_id) and text != SECRET_KEY:
-        await start_command(update, context)
-        return
-    
-    if text == SECRET_KEY:
-        await handle_secret_key(update, context)
-        return
-    
-    step = context.user_data.get('setup_step', 'awaiting_option')
-    
-    if step == 'awaiting_option':
-        await handle_option(update, context)
-    elif step == 'awaiting_cookies':
-        await handle_cookies(update, context)
-    elif step == 'awaiting_chat_id':
-        await handle_chat_id(update, context)
-    elif step == 'awaiting_name_prefix':
-        await handle_name_prefix(update, context)
-    elif step == 'awaiting_delay':
-        await handle_delay(update, context)
-    elif step == 'awaiting_code':
-        await handle_code(update, context)
-    else:
-        await show_menu(update, context)
-
-def main():
-    threading.Thread(target=health_check, daemon=True).start()
-    
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("stop", stop_task_command))
-    application.add_handler(CommandHandler("resume", resume_task_command))
-    application.add_handler(CommandHandler("status", status_task_command))
-    application.add_handler(CommandHandler("delete", delete_task_command))
-    application.add_handler(CommandHandler("uptime", uptime_task_command))
-    application.add_handler(CommandHandler("logs", logs_command))
-    application.add_handler(CommandHandler("tasks", list_tasks_command))
-    
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_handler(MessageHandler(filters.Document.ALL, handle_messages))
-    
+if __name__ == '__main__':
     print("=" * 60)
-    print("ðŸš€ R4J M1SHR4 Bot Started!")
-    print(f"ðŸ“± Bot running with browser restart every {BROWSER_RESTART_HOURS} hours")
-    print("ðŸ”ª Hard kill enabled - restart kabhi fail nahi hoga")
-    print("ðŸ’¾ Messages resume from exact rotation index after restart")
-    print("ðŸ” Cookies preserved - no relogin needed")
+    print("🤖 Facebook Message Bot - Web UI")
+    print(f"🔄 Browser Restart: Every {BROWSER_RESTART_HOURS} hours")
+    print("🔪 Hard kill enabled - auto-restart on crash")
+    print("💾 Messages resume from exact rotation index after restart")
+    print("⏱️ No timeout set - default Selenium timeout")
+    print(f"📍 Access at: http://localhost:{PORT}")
+    print(f"🔑 Default login: admin / admin123")
     print("=" * 60)
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
-
-if __name__ == "__main__":
-    main()
+    app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
