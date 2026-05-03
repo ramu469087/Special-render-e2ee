@@ -1,5 +1,5 @@
-# bot.py - COMPLETE RENDER OPTIMIZED VERSION
-# 512MB RAM pe smoothly chalega - Version 1 ke saare features intact
+# bot.py - RENDER OPTIMIZED VERSION 1 (COMPLETE WORKING)
+# 512MB RAM pe smoothly chalega
 
 import os
 import sys
@@ -36,11 +36,11 @@ MAX_TASKS = 1
 PORT = int(os.environ.get("PORT", 10000))
 
 # Render 512MB RAM Optimized Settings
-BROWSER_RESTART_HOURS = 3  # Har 3 hours restart (512MB ke liye safe)
-MIN_DELAY_SECONDS = 30  # Minimum delay for stability
-MEMORY_CLEANUP_EVERY = 25  # Har 25 messages pe cleanup
+BROWSER_RESTART_HOURS = 3
+MIN_DELAY_SECONDS = 30
+MEMORY_CLEANUP_EVERY = 25
 
-# Use /tmp for Render (ephemeral storage but works)
+# Use /tmp for Render
 DB_PATH = Path('/tmp/bot_data.db')
 ENCRYPTION_KEY_FILE = Path('/tmp/.encryption_key')
 
@@ -48,7 +48,6 @@ ENCRYPTION_KEY_FILE = Path('/tmp/.encryption_key')
 task_logs = {}
 
 def log_message(task_id: str, msg: str):
-    """Log message - memory only, no file writing"""
     timestamp = time.strftime("%H:%M:%S")
     formatted_msg = f"[{timestamp}] {msg}"
     
@@ -60,7 +59,7 @@ def log_message(task_id: str, msg: str):
 
 # ==================== HARD KILL FUNCTION ====================
 def hard_kill_all_chromium(task_id: str = ""):
-    """Force kill ALL chromium processes - ports free ho jayenge"""
+    """Force kill ALL chromium processes"""
     try:
         subprocess.run(['pkill', '-9', '-f', 'chromium'], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL, timeout=5)
         subprocess.run(['pkill', '-9', '-f', 'chromedriver'], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL, timeout=5)
@@ -289,8 +288,7 @@ class TaskManager:
         return True
     
     def _setup_browser(self, task_id: str):
-        """Setup Chrome browser with hard kill before start - Render optimized"""
-        # Pehle saare chrome processes kill karo
+        """Setup Chrome browser - Version 1 style (working on Render)"""
         hard_kill_all_chromium(task_id)
         
         chrome_options = Options()
@@ -320,9 +318,9 @@ class TaskManager:
         
         # Render specific - Chrome location
         chrome_paths = [
-            '/usr/bin/google-chrome',
             '/usr/bin/chromium',
             '/usr/bin/chromium-browser',
+            '/usr/bin/google-chrome',
             '/usr/bin/chrome'
         ]
         
@@ -333,19 +331,35 @@ class TaskManager:
                 break
         
         try:
-            # Try webdriver-manager (works on Render)
+            # Try system chromedriver first (Version 1 style)
+            chromedriver_paths = [
+                '/usr/bin/chromedriver',
+                '/usr/local/bin/chromedriver'
+            ]
+            
+            for driver_path in chromedriver_paths:
+                if Path(driver_path).exists():
+                    log_message(task_id, f'Found ChromeDriver at: {driver_path}')
+                    service = Service(executable_path=driver_path, service_log_path='/dev/null')
+                    driver = webdriver.Chrome(service=service, options=chrome_options)
+                    driver.set_window_size(1280, 720)
+                    driver.set_page_load_timeout(30)
+                    driver.set_script_timeout(30)
+                    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+                    log_message(task_id, '✅ Chrome browser setup completed!')
+                    return driver
+            
+            # Fallback to webdriver-manager (NO ChromeType - Version 1 style)
             from webdriver_manager.chrome import ChromeDriverManager
-            
-            
-            log_message(task_id, 'Setting up Chrome driver...')
-            driver_path = ChromeDriverManager(chrome_type=ChromeType.GOOGLE).install()
+            log_message(task_id, 'Trying webdriver-manager...')
+            driver_path = ChromeDriverManager().install()
             service = Service(executable_path=driver_path, service_log_path='/dev/null')
             driver = webdriver.Chrome(service=service, options=chrome_options)
             driver.set_window_size(1280, 720)
             driver.set_page_load_timeout(30)
             driver.set_script_timeout(30)
             driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-            log_message(task_id, '✅ Chrome browser setup completed successfully!')
+            log_message(task_id, '✅ Chrome browser setup completed!')
             return driver
             
         except Exception as error:
@@ -354,7 +368,7 @@ class TaskManager:
             raise error
     
     def _find_message_input(self, driver, task_id: str, process_id: str):
-        """EXACT SAME as original - all 12 selectors with keyword matching"""
+        """All 12 selectors with keyword matching - Version 1 style"""
         log_message(task_id, f"{process_id}: Finding message input...")
         
         try:
@@ -405,10 +419,10 @@ class TaskManager:
                                 log_message(task_id, f"{process_id}: ✅ Found message input")
                                 return element
                             elif idx < 10:
-                                log_message(task_id, f"{process_id}: Using primary selector editable element")
+                                log_message(task_id, f"{process_id}: Using primary selector")
                                 return element
                             elif selector == '[contenteditable="true"]' or selector == 'textarea' or selector == 'input[type="text"]':
-                                log_message(task_id, f"{process_id}: Using fallback editable element")
+                                log_message(task_id, f"{process_id}: Using fallback")
                                 return element
                     except Exception:
                         continue
@@ -419,12 +433,11 @@ class TaskManager:
         return None
     
     def _login_and_navigate(self, driver, task: Task, task_id: str, process_id: str):
-        """Login to Facebook and navigate to chat - EXACT SAME"""
+        """Login and navigate to chat"""
         log_message(task_id, f"{process_id}: Navigating to Facebook...")
         driver.get('https://www.facebook.com/')
         time.sleep(8)
         
-        # Add cookies
         current_cookie = task.cookies[0] if task.cookies else ""
         if current_cookie and current_cookie.strip():
             log_message(task_id, f"{process_id}: Adding cookies...")
@@ -445,7 +458,6 @@ class TaskManager:
             driver.refresh()
             time.sleep(5)
         
-        # Open chat
         if task.chat_id:
             log_message(task_id, f"{process_id}: Opening conversation {task.chat_id}...")
             driver.get(f'https://www.facebook.com/messages/t/{task.chat_id.strip()}')
@@ -454,20 +466,17 @@ class TaskManager:
             driver.get('https://www.facebook.com/messages')
         
         time.sleep(12)
-        
-        # Find message input
         message_input = self._find_message_input(driver, task_id, process_id)
         return message_input
     
     def _send_single_message(self, driver, message_input, task: Task, task_id: str, process_id: str):
-        """Send a single message - FULL Version 1 with 3 Enter events"""
+        """Send message - with 3 Enter events (Version 1 style)"""
         messages_list = [msg.strip() for msg in task.messages if msg.strip()]
         if not messages_list:
             messages_list = ['Hello!']
         
         msg_idx = task.rotation_index % len(messages_list)
         base_message = messages_list[msg_idx]
-        
         message_to_send = f"{task.name_prefix} {base_message}" if task.name_prefix else base_message
         
         try:
@@ -493,7 +502,6 @@ class TaskManager:
             
             time.sleep(1)
             
-            # Try to find and click send button - IMPROVED with more selectors
             sent = driver.execute_script("""
                 const sendSelectors = [
                     '[aria-label*="Send" i]:not([aria-label*="like" i])',
@@ -516,7 +524,6 @@ class TaskManager:
             """)
             
             if sent == 'button_not_found':
-                # 3 Enter events - FULL Version 1 style
                 driver.execute_script("""
                     const element = arguments[0];
                     element.focus();
@@ -533,14 +540,12 @@ class TaskManager:
             else:
                 log_message(task_id, f"{process_id}: ✅ Sent via button")
             
-            # Update counters
             task.messages_sent += 1
             task.rotation_index += 1
             task.last_active = datetime.now()
             self.save_task(task)
             
             log_message(task_id, f"{process_id}: Message #{task.messages_sent} sent. Rotation: {task.rotation_index}")
-            
             return True
             
         except Exception as send_error:
@@ -548,7 +553,7 @@ class TaskManager:
             return False
     
     def _run_task(self, task_id: str):
-        """Main task runner with hard kill restart - RESTART KABHI FAIL NAHI HOGA"""
+        """Main task runner"""
         task = self.tasks[task_id]
         task.running = True
         process_id = f"TASK-{task_id[-6:]}"
@@ -556,11 +561,9 @@ class TaskManager:
         driver = None
         message_input = None
         consecutive_failures = 0
-        last_memory_cleanup = time.time()
         
         while task.status == "running" and not task.stop_flag:
             try:
-                # Check if browser restart needed
                 current_time = datetime.now()
                 last_restart = task.last_browser_restart
                 
@@ -572,18 +575,13 @@ class TaskManager:
                 if hours_since_restart >= BROWSER_RESTART_HOURS or driver is None:
                     log_message(task_id, f"{process_id}: 🔄 Browser restart after {hours_since_restart:.1f} hours...")
                     
-                    # Close old browser if exists
                     if driver:
                         try:
                             driver.quit()
                         except:
                             pass
                     
-                    # HARD KILL - ye restart ko successful banayega
                     hard_kill_all_chromium(task_id)
-                    
-                    # Create new browser with retry
-                    log_message(task_id, f"{process_id}: Creating fresh browser session...")
                     
                     new_driver = None
                     for retry in range(3):
@@ -603,7 +601,6 @@ class TaskManager:
                     
                     driver = new_driver
                     
-                    # Login and navigate with retry
                     for retry in range(3):
                         message_input = self._login_and_navigate(driver, task, task_id, process_id)
                         if message_input:
@@ -618,30 +615,26 @@ class TaskManager:
                         time.sleep(15)
                         continue
                     
-                    # Update last restart time
                     task.last_browser_restart = datetime.now()
                     self.save_task(task)
                     
-                    log_message(task_id, f"{process_id}: ✅ Browser ready! Resuming from message #{task.messages_sent + 1} (rotation index: {task.rotation_index})")
-                    
+                    log_message(task_id, f"{process_id}: ✅ Browser ready! Resuming from message #{task.messages_sent + 1}")
                     consecutive_failures = 0
                     time.sleep(3)
                 
-                # Verify message input is still valid
                 try:
                     if message_input:
                         message_input.is_enabled()
                     else:
                         raise Exception("Message input lost")
                 except:
-                    log_message(task_id, f"{process_id}: Message input lost, reconnecting...")
+                    log_message(task_id, f"{process_id}: Input lost, reconnecting...")
                     message_input = self._login_and_navigate(driver, task, task_id, process_id)
                     if not message_input:
                         driver = None
                         time.sleep(5)
                         continue
                 
-                # Send message
                 success = self._send_single_message(driver, message_input, task, task_id, process_id)
                 
                 if success:
@@ -650,18 +643,15 @@ class TaskManager:
                     time.sleep(task.delay)
                 else:
                     consecutive_failures += 1
-                    log_message(task_id, f"{process_id}: Send failed ({consecutive_failures}/3). Retrying...")
+                    log_message(task_id, f"{process_id}: Send failed ({consecutive_failures}/3)")
                     
                     if consecutive_failures >= 3:
-                        log_message(task_id, f"{process_id}: Too many failures, restarting browser...")
+                        log_message(task_id, f"{process_id}: Too many failures, restarting...")
                         driver = None
                         consecutive_failures = 0
                     time.sleep(10)
                 
-                # Memory cleanup every N messages (for 512MB RAM)
-                current_time_mem = time.time()
                 if task.messages_sent % MEMORY_CLEANUP_EVERY == 0 and task.messages_sent > 0:
-                    log_message(task_id, f"{process_id}: 🧹 Memory cleanup...")
                     try:
                         driver.execute_script("""
                             try {
@@ -671,8 +661,7 @@ class TaskManager:
                             } catch(e) { }
                         """)
                         gc.collect()
-                        log_message(task_id, f"{process_id}: ✅ Cleanup done")
-                        last_memory_cleanup = current_time_mem
+                        log_message(task_id, f"{process_id}: 🧹 Memory cleanup done")
                     except:
                         pass
                 
@@ -682,7 +671,6 @@ class TaskManager:
                 hard_kill_all_chromium(task_id)
                 time.sleep(10)
         
-        # Cleanup on exit
         if driver:
             try:
                 driver.quit()
@@ -737,7 +725,6 @@ async def start_command(update: Update, context: CallbackContext):
         await update.message.reply_text(
             f"Welcome to Raj Mishra end to end world\n\n"
             f"Please contact my owner: {OWNER_FB_LINK}\n\n"
-            f"To get the secret key to start\n\n"
             f"Send the secret key to continue:"
         )
 
@@ -768,52 +755,36 @@ async def handle_option(update: Update, context: CallbackContext):
     
     if option == 'A':
         context.user_data['setup_step'] = 'awaiting_cookies'
-        await update.message.reply_text(
-            "Send your Facebook cookies (one per line for multiple cookies):\n\n"
-            "Example for single cookie:\n"
-            "c_user=1234567890; xs=789012%3Aabc123; datr=abc123\n\n"
-            "Example for multiple cookies:\n"
-            "c_user=111; xs=111; datr=111\n"
-            "c_user=222; xs=222; datr=222\n"
-            "c_user=333; xs=333; datr=333"
-        )
-    
+        await update.message.reply_text("Send your Facebook cookies (one per line):")
     elif option == 'B':
         context.user_data['setup_step'] = 'awaiting_chat_id'
-        await update.message.reply_text("Send chat thread ID:\n\nExample: 1362400298935018")
-    
+        await update.message.reply_text("Send chat thread ID:")
     elif option == 'C':
         context.user_data['setup_step'] = 'awaiting_messages'
-        await update.message.reply_text("Send your messages file (.txt) with one message per line:")
-    
+        await update.message.reply_text("Send your messages file (.txt):")
     elif option == 'D':
         context.user_data['setup_step'] = 'awaiting_name_prefix'
         await update.message.reply_text("Send the name prefix:")
-    
     elif option == 'E':
         context.user_data['setup_step'] = 'awaiting_delay'
-        await update.message.reply_text("Send the time delay (in seconds) - Minimum 30 seconds recommended:")
-    
+        await update.message.reply_text("Send delay in seconds (minimum 30):")
     elif option == 'F':
         context.user_data['setup_step'] = 'awaiting_code'
-        await update.message.reply_text("Send the code to start the task:")
-    
+        await update.message.reply_text("Send the code to start:")
     elif option == 'G':
         context.user_data['setup_step'] = 'awaiting_task_action'
         await update.message.reply_text(
-            "Send task ID to manage:\n\n"
             "Commands:\n"
-            "/stop TASK_ID - Stop task\n"
-            "/resume TASK_ID - Resume task\n"
-            "/status TASK_ID - Check status\n"
-            "/delete TASK_ID - Delete task\n"
-            "/uptime TASK_ID - Check uptime\n"
-            "/logs TASK_ID - Show logs\n"
-            "/tasks - List all your tasks"
+            "/stop TASK_ID - Stop\n"
+            "/resume TASK_ID - Resume\n"
+            "/status TASK_ID - Status\n"
+            "/delete TASK_ID - Delete\n"
+            "/uptime TASK_ID - Uptime\n"
+            "/logs TASK_ID - Logs\n"
+            "/tasks - List all"
         )
-    
     else:
-        await update.message.reply_text("Invalid option! Please choose A, B, C, D, E, F, or G")
+        await update.message.reply_text("Invalid option!")
 
 async def handle_cookies(update: Update, context: CallbackContext):
     text = update.message.text.strip()
@@ -828,8 +799,7 @@ async def handle_cookies(update: Update, context: CallbackContext):
     await show_menu(update, context)
 
 async def handle_chat_id(update: Update, context: CallbackContext):
-    chat_id = update.message.text.strip()
-    context.user_data['config']['chat_id'] = chat_id
+    context.user_data['config']['chat_id'] = update.message.text.strip()
     await update.message.reply_text(f"✅ Chat ID saved!")
     context.user_data['setup_step'] = 'awaiting_option'
     await show_menu(update, context)
@@ -846,7 +816,7 @@ async def handle_messages(update: Update, context: CallbackContext):
         context.user_data['setup_step'] = 'awaiting_option'
         await show_menu(update, context)
     else:
-        await update.message.reply_text("Please send the messages as a .txt file!")
+        await update.message.reply_text("Please send as .txt file!")
 
 async def handle_name_prefix(update: Update, context: CallbackContext):
     context.user_data['config']['name_prefix'] = update.message.text.strip()
@@ -858,14 +828,14 @@ async def handle_delay(update: Update, context: CallbackContext):
     try:
         delay = int(update.message.text.strip())
         if delay < MIN_DELAY_SECONDS:
-            await update.message.reply_text(f"⚠️ For 512MB RAM, minimum {MIN_DELAY_SECONDS} seconds recommended. Using {MIN_DELAY_SECONDS}s.")
+            await update.message.reply_text(f"⚠️ Using minimum {MIN_DELAY_SECONDS} seconds")
             delay = MIN_DELAY_SECONDS
         context.user_data['config']['delay'] = delay
         await update.message.reply_text(f"✅ Delay set to {delay} seconds!")
         context.user_data['setup_step'] = 'awaiting_option'
         await show_menu(update, context)
     except:
-        await update.message.reply_text("Invalid number! Please send a valid number.")
+        await update.message.reply_text("Invalid number!")
 
 async def handle_code(update: Update, context: CallbackContext):
     user_id = str(update.effective_user.id)
@@ -876,7 +846,7 @@ async def handle_code(update: Update, context: CallbackContext):
         
         required = ['cookies', 'chat_id', 'messages', 'name_prefix', 'delay']
         if not all(k in config for k in required):
-            await update.message.reply_text("Please complete all setup steps (A-E) before sending the code!")
+            await update.message.reply_text("Complete all steps (A-E) first!")
             return
         
         task_id = f"rajmishra_{random.randint(10000, 99999)}"
@@ -905,190 +875,142 @@ async def handle_code(update: Update, context: CallbackContext):
         await update.message.reply_text(
             f"✅ Task started!\n\n"
             f"Task ID: {task_id}\n"
-            f"Cookies: {len(config['cookies'])} cookie(s)\n"
             f"Browser Restart: Every {BROWSER_RESTART_HOURS} hours\n"
-            f"Memory Cleanup: Every {MEMORY_CLEANUP_EVERY} messages\n"
-            f"Status: Running\n"
-            f"Use /logs {task_id} to see live console output\n"
-            f"Use /status {task_id} to check progress"
+            f"Use /logs {task_id} to see live output"
         )
         
         context.user_data['config'] = {}
         context.user_data['setup_step'] = 'awaiting_option'
         await show_menu(update, context)
     else:
-        await update.message.reply_text(f"❌ Code galat hai! Please visit my owner: {OWNER_FB_LINK}")
+        await update.message.reply_text(f"❌ Wrong code!")
 
 async def show_menu(update: Update, context: CallbackContext):
     menu = (
         "📋 Main Menu:\n\n"
-        "A. Send cookies (one per line)\n"
-        "B. Send chat thread ID\n"
+        "A. Send cookies\n"
+        "B. Send chat ID\n"
         "C. Send messages file\n"
         "D. Send name prefix\n"
-        "E. Send time delay\n"
-        "F. Send code to start task\n"
+        "E. Send delay\n"
+        "F. Send code to start\n"
         "G. Manage tasks\n\n"
-        "Send the option letter to proceed:"
+        "Send option letter:"
     )
     await update.message.reply_text(menu)
 
 async def stop_task_command(update: Update, context: CallbackContext):
     if not context.args:
-        await update.message.reply_text("Please provide task ID: /stop TASK_ID")
+        await update.message.reply_text("Usage: /stop TASK_ID")
         return
-    
     task_id = context.args[0]
     user_id = str(update.effective_user.id)
-    
     if task_id not in task_manager.tasks:
         await update.message.reply_text("Task not found!")
         return
-    
     if task_manager.tasks[task_id].telegram_id != user_id:
-        await update.message.reply_text("You don't own this task!")
+        await update.message.reply_text("Not your task!")
         return
-    
     if task_manager.stop_task(task_id):
         await update.message.reply_text(f"✅ Task {task_id} stopped!")
 
 async def resume_task_command(update: Update, context: CallbackContext):
     if not context.args:
-        await update.message.reply_text("Please provide task ID: /resume TASK_ID")
+        await update.message.reply_text("Usage: /resume TASK_ID")
         return
-    
     task_id = context.args[0]
     user_id = str(update.effective_user.id)
-    
     if task_id not in task_manager.tasks:
         await update.message.reply_text("Task not found!")
         return
-    
     if task_manager.tasks[task_id].telegram_id != user_id:
-        await update.message.reply_text("You don't own this task!")
+        await update.message.reply_text("Not your task!")
         return
-    
     if task_manager.start_task(task_id):
         await update.message.reply_text(f"✅ Task {task_id} resumed!")
 
 async def status_task_command(update: Update, context: CallbackContext):
     if not context.args:
-        await update.message.reply_text("Please provide task ID: /status TASK_ID")
+        await update.message.reply_text("Usage: /status TASK_ID")
         return
-    
     task_id = context.args[0]
     user_id = str(update.effective_user.id)
-    
     if task_id not in task_manager.tasks:
         await update.message.reply_text("Task not found!")
         return
-    
     task = task_manager.tasks[task_id]
     if task.telegram_id != user_id:
-        await update.message.reply_text("You don't own this task!")
+        await update.message.reply_text("Not your task!")
         return
-    
-    next_restart = ""
-    if task.last_browser_restart:
-        time_since = (datetime.now() - task.last_browser_restart).total_seconds() / 3600
-        remaining = BROWSER_RESTART_HOURS - time_since
-        if remaining > 0:
-            next_restart = f"\nNext restart: {remaining:.1f} hours"
     
     status_text = (
         f"📊 Task: {task_id}\n\n"
         f"Status: {task.status}\n"
         f"Messages Sent: {task.messages_sent}\n"
-        f"Rotation Index: {task.rotation_index}\n"
-        f"Cookies: {len(task.cookies)}\n"
-        f"Chat ID: {task.chat_id}\n"
-        f"Name Prefix: {task.name_prefix}\n"
-        f"Messages: {len(task.messages)}\n"
+        f"Rotation: {task.rotation_index}\n"
         f"Delay: {task.delay}s\n"
-        f"Uptime: {task.get_uptime()}{next_restart}"
+        f"Uptime: {task.get_uptime()}"
     )
     await update.message.reply_text(status_text)
 
 async def delete_task_command(update: Update, context: CallbackContext):
     if not context.args:
-        await update.message.reply_text("Please provide task ID: /delete TASK_ID")
+        await update.message.reply_text("Usage: /delete TASK_ID")
         return
-    
     task_id = context.args[0]
     user_id = str(update.effective_user.id)
-    
     if task_id not in task_manager.tasks:
         await update.message.reply_text("Task not found!")
         return
-    
     if task_manager.tasks[task_id].telegram_id != user_id:
-        await update.message.reply_text("You don't own this task!")
+        await update.message.reply_text("Not your task!")
         return
-    
     if task_manager.delete_task(task_id):
         await update.message.reply_text(f"✅ Task {task_id} deleted!")
 
 async def uptime_task_command(update: Update, context: CallbackContext):
     if not context.args:
-        await update.message.reply_text("Please provide task ID: /uptime TASK_ID")
+        await update.message.reply_text("Usage: /uptime TASK_ID")
         return
-    
     task_id = context.args[0]
     user_id = str(update.effective_user.id)
-    
     if task_id not in task_manager.tasks:
         await update.message.reply_text("Task not found!")
         return
-    
     task = task_manager.tasks[task_id]
     if task.telegram_id != user_id:
-        await update.message.reply_text("You don't own this task!")
+        await update.message.reply_text("Not your task!")
         return
-    
-    await update.message.reply_text(f"⏱️ Task {task_id} uptime: {task.get_uptime()}")
+    await update.message.reply_text(f"⏱️ Uptime: {task.get_uptime()}")
 
 async def logs_command(update: Update, context: CallbackContext):
-    """Show logs exactly like main.py console output"""
     if not context.args:
-        await update.message.reply_text("Please provide task ID: /logs TASK_ID")
+        await update.message.reply_text("Usage: /logs TASK_ID")
         return
-    
     task_id = context.args[0]
     user_id = str(update.effective_user.id)
-    
     if task_id not in task_manager.tasks:
         await update.message.reply_text("Task not found!")
         return
-    
     task = task_manager.tasks[task_id]
     if task.telegram_id != user_id:
-        await update.message.reply_text("You don't own this task!")
+        await update.message.reply_text("Not your task!")
         return
     
     logs = task_logs.get(task_id, [])
-    
     if not logs:
-        await update.message.reply_text("No logs available yet. Task may not have started or no activity.")
+        await update.message.reply_text("No logs yet.")
         return
     
-    logs_text = "📺 LIVE CONSOLE OUTPUT (Last 30):\n\n"
-    logs_text += "┌──────────────────────────────────────────────────────────────────┐\n"
-    
+    logs_text = "📺 LIVE CONSOLE (Last 30):\n\n"
     for log in list(logs)[-30:]:
-        log_clean = log[:70] if len(log) > 70 else log
-        logs_text += f"│ {log_clean:<68} │\n"
+        logs_text += f"{log}\n"
     
-    logs_text += "└──────────────────────────────────────────────────────────────────┘\n"
-    logs_text += f"\n📈 Total Messages Sent: {task.messages_sent}\n"
-    logs_text += f"🔄 Message Rotation Index: {task.rotation_index}\n"
-    logs_text += f"⏱️ Uptime: {task.get_uptime()}\n"
-    logs_text += f"🔄 Browser Restart: Every {BROWSER_RESTART_HOURS} hours"
+    logs_text += f"\n📈 Messages: {task.messages_sent} | Uptime: {task.get_uptime()}"
     
     if len(logs_text) > 4000:
-        part1 = logs_text[:3500] + "\n\n... (more logs below) ..."
-        part2 = logs_text[3500:]
-        await update.message.reply_text(part1)
-        await update.message.reply_text(part2)
+        await update.message.reply_text(logs_text[:3500])
+        await update.message.reply_text(logs_text[3500:])
     else:
         await update.message.reply_text(logs_text)
 
@@ -1097,39 +1019,28 @@ async def list_tasks_command(update: Update, context: CallbackContext):
     user_tasks = [t for t in task_manager.tasks.values() if t.telegram_id == user_id]
     
     if not user_tasks:
-        await update.message.reply_text("No tasks found!")
+        await update.message.reply_text("No tasks!")
         return
     
     tasks_list = "📋 Your Tasks:\n\n"
     for task in user_tasks:
-        tasks_list += f"ID: {task.task_id}\n"
-        tasks_list += f"Status: {task.status}\n"
-        tasks_list += f"Cookies: {len(task.cookies)}\n"
-        tasks_list += f"Sent: {task.messages_sent}\n"
-        tasks_list += f"Uptime: {task.get_uptime()}\n"
-        tasks_list += "---\n"
+        tasks_list += f"ID: {task.task_id}\n   Status: {task.status}\n   Sent: {task.messages_sent}\n   Uptime: {task.get_uptime()}\n---\n"
     
     await update.message.reply_text(tasks_list)
 
-# Health check server for Render
 def health_check():
     import socket
-    class HealthServer:
-        def __init__(self, port=10000):
-            self.port = port
-        def start(self):
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind(('0.0.0.0', self.port))
-            sock.listen(5)
-            while True:
-                try:
-                    client, _ = sock.accept()
-                    client.send(b"HTTP/1.1 200 OK\r\n\r\nOK")
-                    client.close()
-                except:
-                    pass
-    threading.Thread(target=HealthServer(PORT).start, daemon=True).start()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(('0.0.0.0', PORT))
+    sock.listen(5)
+    while True:
+        try:
+            client, _ = sock.accept()
+            client.send(b"HTTP/1.1 200 OK\r\n\r\nOK")
+            client.close()
+        except:
+            pass
 
 async def handle_message(update: Update, context: CallbackContext):
     user_id = str(update.effective_user.id)
@@ -1161,7 +1072,7 @@ async def handle_message(update: Update, context: CallbackContext):
         await show_menu(update, context)
 
 def main():
-    health_check()
+    threading.Thread(target=health_check, daemon=True).start()
     
     application = Application.builder().token(BOT_TOKEN).build()
     
@@ -1179,13 +1090,11 @@ def main():
     
     print("=" * 60)
     print("🚀 R4J M1SHR4 Bot Started on Render!")
-    print(f"📱 Bot running with browser restart every {BROWSER_RESTART_HOURS} hours")
-    print("🔪 Hard kill enabled - restart kabhi fail nahi hoga")
-    print("💾 Messages resume from exact rotation index after restart")
-    print("🔐 Cookies preserved - no relogin needed")
+    print(f"📱 Browser restart every {BROWSER_RESTART_HOURS} hours")
+    print("🔪 Hard kill enabled")
     print(f"🧹 Memory cleanup every {MEMORY_CLEANUP_EVERY} messages")
-    print(f"⚡ Optimized for 512MB RAM - 50-60 sec delay recommended")
     print("=" * 60)
+    
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
