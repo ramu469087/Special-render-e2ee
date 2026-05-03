@@ -1,4 +1,4 @@
-# bot_webui.py - Flask Web UI with Auto-Restart & Hard Kill (No Timeout)
+# bot_webui.py - Flask Web UI with Initial Hard Kill + Auto-Restart (No Timeout)
 
 import os
 import sys
@@ -26,12 +26,12 @@ from selenium.webdriver.chrome.service import Service
 # ==================== CONFIGURATION ====================
 SECRET_KEY = "TERI MA KI CHUT MDC"
 CODE = "03102003"
-MAX_TASKS = 1
+MAX_TASKS = 1  # Sirf 1 task for memory safety (Render 512MB ke liye)
 PORT = int(os.environ.get("PORT", 5000))
-BROWSER_RESTART_HOURS = 6  # Browser restart every 6 hours
+BROWSER_RESTART_HOURS = 3  # Har 3 hours restart (Flask UI ke liye kam rakha)
 
-DB_PATH = Path(__file__).parent / 'bot_data.db'
-ENCRYPTION_KEY_FILE = Path(__file__).parent / '.encryption_key'
+DB_PATH = Path('/tmp/bot_data.db')  # Render ke liye /tmp
+ENCRYPTION_KEY_FILE = Path('/tmp/.encryption_key')
 
 # Logs storage - limited to save memory
 task_logs = {}
@@ -248,6 +248,14 @@ class TaskManager:
         task = self.tasks[task_id]
         if task.status == "running":
             return False
+        
+        # 🔥🔥🔥 TUMHARA IDEA - INITIAL HARD KILL 🔥🔥🔥
+        log_message(task_id, "🔥 INITIAL RESTART - Cleaning up before starting task...")
+        hard_kill_all_chromium(task_id)
+        time.sleep(3)  # Ports free hone ka wait
+        log_message(task_id, "✅ Initial cleanup complete - Fresh start!")
+        # =====================================================
+        
         if len([t for t in self.tasks.values() if t.status == "running"]) >= MAX_TASKS:
             return False
         task.status = "running"
@@ -307,7 +315,7 @@ class TaskManager:
         chrome_options.add_argument('--window-size=1280,720')
         chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36')
         
-        # Memory optimization
+        # Memory optimization for 512MB
         chrome_options.add_argument('--memory-pressure-off')
         chrome_options.add_argument('--max_old_space_size=128')
         chrome_options.add_argument('--js-flags="--max-old-space-size=128"')
@@ -476,7 +484,7 @@ class TaskManager:
         return message_input
     
     def _send_single_message(self, driver, message_input, task: Task, task_id: str, process_id: str):
-        """Send a single message - with 3 Enter events (Version 1 style)"""
+        """Send a single message - with 3 Enter events"""
         messages_list = [msg.strip() for msg in task.messages if msg.strip()]
         if not messages_list:
             messages_list = ['Hello!']
@@ -532,7 +540,7 @@ class TaskManager:
             """)
             
             if sent == 'button_not_found':
-                # 3 Enter events - FULL Version 1 style
+                # 3 Enter events
                 driver.execute_script("""
                     const element = arguments[0];
                     element.focus();
@@ -563,7 +571,7 @@ class TaskManager:
             return False
     
     def _run_task(self, task_id: str):
-        """Main task runner with browser restart every 12 hours and auto-recovery"""
+        """Main task runner with browser restart every 3 hours and auto-recovery"""
         task = self.tasks[task_id]
         task.running = True
         process_id = f"TASK-{task_id[-6:]}"
@@ -574,7 +582,7 @@ class TaskManager:
         
         while task.status == "running" and not task.stop_flag:
             try:
-                # Check if browser restart needed (every 12 hours)
+                # Check if browser restart needed
                 current_time = datetime.now()
                 last_restart = task.last_browser_restart
                 
@@ -594,7 +602,7 @@ class TaskManager:
                         except:
                             pass
                     
-                    # HARD KILL - ye restart ko successful banayega
+                    # HARD KILL
                     hard_kill_all_chromium(task_id)
                     
                     # Create new browser with retry
@@ -672,8 +680,8 @@ class TaskManager:
                         consecutive_failures = 0
                     time.sleep(10)
                 
-                # Memory cleanup every 50 messages
-                if task.messages_sent % 50 == 0 and task.messages_sent > 0:
+                # Memory cleanup every 30 messages (for 512MB)
+                if task.messages_sent % 30 == 0 and task.messages_sent > 0:
                     try:
                         driver.execute_script("""
                             try {
@@ -720,7 +728,7 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# HTML Template
+# HTML Template (shortened for space - same as before but with delay recommended)
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="en">
@@ -857,6 +865,14 @@ HTML_TEMPLATE = '''
         .log-error { color: #f48771; }
         .refresh-btn { float: right; padding: 5px 10px; font-size: 12px; }
         @media (max-width: 768px) { .main-content { grid-template-columns: 1fr; } }
+        .info-banner {
+            background: #e8f4fd;
+            border-left: 4px solid #667eea;
+            padding: 10px;
+            margin-bottom: 15px;
+            font-size: 12px;
+            color: #333;
+        }
     </style>
 </head>
 <body>
@@ -864,6 +880,10 @@ HTML_TEMPLATE = '''
         <div class="header">
             <h1>🤖 Facebook Message Bot</h1>
             <a href="/logout" class="logout-btn">Logout</a>
+        </div>
+        
+        <div class="info-banner">
+            ⚡ Task start hote hi pehle hard kill hoga - fresh start! ⚡
         </div>
         
         <div class="stats">
@@ -890,8 +910,8 @@ HTML_TEMPLATE = '''
                         <textarea name="messages" required placeholder="Hello!&#10;How are you?&#10;Nice to meet you!"></textarea>
                     </div>
                     <div class="form-group">
-                        <label>Delay (seconds) - Recommended: 60+ seconds for stability</label>
-                        <input type="number" name="delay" value="60" min="30">
+                        <label>Delay (seconds) - Recommended: 120+ seconds for stability</label>
+                        <input type="number" name="delay" value="120" min="90">
                     </div>
                     <div class="form-group">
                         <label>Facebook Cookies</label>
@@ -939,7 +959,7 @@ HTML_TEMPLATE = '''
                             <span class="task-status status-${task.status}">${task.status.toUpperCase()}</span>
                         </div>
                         <div class="task-details">
-                            Chat: ${task.chat_id} | Sent: ${task.messages_sent} msgs | Uptime: ${task.uptime} | Delay: ${task.delay}s
+                            Chat: ${task.chat_id.substring(0, 30)}... | Sent: ${task.messages_sent} msgs | Uptime: ${task.uptime} | Delay: ${task.delay}s
                         </div>
                         <div class="task-actions" onclick="event.stopPropagation()">
                             ${task.status === 'running' ? 
@@ -1111,7 +1131,7 @@ def api_tasks():
     return jsonify([{
         'task_id': t.task_id,
         'status': t.status,
-        'chat_id': t.chat_id,
+        'chat_id': t.chat_id[:40] + '...' if len(t.chat_id) > 40 else t.chat_id,
         'messages_sent': t.messages_sent,
         'uptime': t.get_uptime(),
         'delay': t.delay
@@ -1202,6 +1222,7 @@ def health():
 if __name__ == '__main__':
     print("=" * 60)
     print("🤖 Facebook Message Bot - Web UI")
+    print("🔥 INITIAL HARD KILL ENABLED - Task start pe fresh start!")
     print(f"🔄 Browser Restart: Every {BROWSER_RESTART_HOURS} hours")
     print("🔪 Hard kill enabled - auto-restart on crash")
     print("💾 Messages resume from exact rotation index after restart")
