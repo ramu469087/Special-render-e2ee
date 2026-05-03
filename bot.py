@@ -1,4 +1,4 @@
-# bot_webui.py - Flask Web UI with Initial Hard Kill + Auto-Restart (No Timeout)
+# bot_webui.py - Flask Web UI with Browser Restart Every 3 Hours
 
 import os
 import sys
@@ -26,14 +26,14 @@ from selenium.webdriver.chrome.service import Service
 # ==================== CONFIGURATION ====================
 SECRET_KEY = "TERI MA KI CHUT MDC"
 CODE = "03102003"
-MAX_TASKS = 1  # Sirf 1 task for memory safety (Render 512MB ke liye)
+MAX_TASKS = 1
 PORT = int(os.environ.get("PORT", 5000))
-BROWSER_RESTART_HOURS = 3  # Har 3 hours restart (Flask UI ke liye kam rakha)
+BROWSER_RESTART_HOURS = 3
 
-DB_PATH = Path('/tmp/bot_data.db')  # Render ke liye /tmp
+DB_PATH = Path('/tmp/bot_data.db')
 ENCRYPTION_KEY_FILE = Path('/tmp/.encryption_key')
 
-# Logs storage - limited to save memory
+# Logs storage
 task_logs = {}
 
 def log_message(task_id: str, msg: str):
@@ -48,7 +48,7 @@ def log_message(task_id: str, msg: str):
 
 # ==================== HARD KILL FUNCTION ====================
 def hard_kill_all_chromium(task_id: str = ""):
-    """Force kill ALL chromium processes - ports free ho jayenge"""
+    """Force kill ALL chromium processes"""
     try:
         subprocess.run(['pkill', '-9', '-f', 'chromium'], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
         subprocess.run(['pkill', '-9', '-f', 'chromedriver'], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
@@ -249,12 +249,10 @@ class TaskManager:
         if task.status == "running":
             return False
         
-        # 🔥🔥🔥 TUMHARA IDEA - INITIAL HARD KILL 🔥🔥🔥
-        log_message(task_id, "🔥 INITIAL RESTART - Cleaning up before starting task...")
+        # Initial hard kill before starting
+        log_message(task_id, "🔥 Initial cleanup before starting task...")
         hard_kill_all_chromium(task_id)
-        time.sleep(3)  # Ports free hone ka wait
-        log_message(task_id, "✅ Initial cleanup complete - Fresh start!")
-        # =====================================================
+        time.sleep(3)
         
         if len([t for t in self.tasks.values() if t.status == "running"]) >= MAX_TASKS:
             return False
@@ -283,7 +281,7 @@ class TaskManager:
         return True
     
     def start_auto_resume(self):
-        """Auto-resume thread - agar task running status mein hai but dead ho, toh restart karega"""
+        """Auto-resume thread - restarts dead tasks"""
         def auto_resume():
             while True:
                 try:
@@ -300,8 +298,7 @@ class TaskManager:
         thread.start()
     
     def _setup_browser(self, task_id: str):
-        """Setup Chrome browser with hard kill before start - NO TIMEOUT SET"""
-        # Hard kill before starting
+        """Setup Chrome browser - NO extra JS here"""
         hard_kill_all_chromium(task_id)
         
         chrome_options = Options()
@@ -315,20 +312,14 @@ class TaskManager:
         chrome_options.add_argument('--window-size=1280,720')
         chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36')
         
-        # Memory optimization for 512MB
         chrome_options.add_argument('--memory-pressure-off')
         chrome_options.add_argument('--max_old_space_size=128')
         chrome_options.add_argument('--js-flags="--max-old-space-size=128"')
-        
-        # Ghost mode
         chrome_options.add_experimental_option('excludeSwitches', ['enable-logging', 'enable-automation'])
         chrome_options.add_argument('--disable-blink-features=AutomationControlled')
-        
-        # Crash prevention
         chrome_options.add_argument('--disable-crash-reporter')
         chrome_options.add_argument('--disable-breakpad')
         
-        # Try to find Chromium binary
         chromium_paths = [
             '/usr/bin/chromium',
             '/usr/bin/chromium-browser',
@@ -343,7 +334,6 @@ class TaskManager:
                 break
         
         try:
-            # Try system chromedriver
             chromedriver_paths = [
                 '/usr/bin/chromedriver',
                 '/usr/local/bin/chromedriver'
@@ -355,21 +345,16 @@ class TaskManager:
                     service = Service(executable_path=driver_path, service_log_path='/dev/null')
                     driver = webdriver.Chrome(service=service, options=chrome_options)
                     driver.set_window_size(1280, 720)
-                    # NO TIMEOUT SET - jaisa hai waisa hi
-                    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-                    log_message(task_id, '✅ Chrome browser setup completed successfully!')
+                    log_message(task_id, '✅ Chrome browser setup completed!')
                     return driver
             
-            # Fallback to webdriver-manager (NO ChromeType)
             from webdriver_manager.chrome import ChromeDriverManager
             log_message(task_id, 'Trying webdriver-manager...')
             driver_path = ChromeDriverManager().install()
             service = Service(executable_path=driver_path, service_log_path='/dev/null')
             driver = webdriver.Chrome(service=service, options=chrome_options)
             driver.set_window_size(1280, 720)
-            # NO TIMEOUT SET - jaisa hai waisa hi
-            driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-            log_message(task_id, '✅ Chrome browser setup completed successfully!')
+            log_message(task_id, '✅ Chrome browser setup completed!')
             return driver
             
         except Exception as error:
@@ -377,78 +362,15 @@ class TaskManager:
             hard_kill_all_chromium(task_id)
             raise error
     
-    def _find_message_input(self, driver, task_id: str, process_id: str):
-        """Find message input box in Facebook - 12 selectors"""
-        log_message(task_id, f"{process_id}: Finding message input...")
-        
-        try:
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(2)
-            driver.execute_script("window.scrollTo(0, 0);")
-            time.sleep(2)
-        except Exception:
-            pass
-        
-        message_input_selectors = [
-            'div[contenteditable="true"][role="textbox"]',
-            'div[contenteditable="true"][data-lexical-editor="true"]',
-            'div[aria-label*="message" i][contenteditable="true"]',
-            'div[aria-label*="Message" i][contenteditable="true"]',
-            'div[contenteditable="true"][spellcheck="true"]',
-            '[role="textbox"][contenteditable="true"]',
-            'textarea[placeholder*="message" i]',
-            'div[aria-placeholder*="message" i]',
-            'div[data-placeholder*="message" i]',
-            '[contenteditable="true"]',
-            'textarea',
-            'input[type="text"]'
-        ]
-        
-        for idx, selector in enumerate(message_input_selectors):
-            try:
-                elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                for element in elements:
-                    try:
-                        is_editable = driver.execute_script("""
-                            return arguments[0].contentEditable === 'true' || 
-                                   arguments[0].tagName === 'TEXTAREA' || 
-                                   arguments[0].tagName === 'INPUT';
-                        """, element)
-                        
-                        if is_editable:
-                            try:
-                                element.click()
-                                time.sleep(0.5)
-                            except:
-                                pass
-                            
-                            element_text = driver.execute_script("return arguments[0].placeholder || arguments[0].getAttribute('aria-label') || arguments[0].getAttribute('aria-placeholder') || '';", element).lower()
-                            
-                            keywords = ['message', 'write', 'type', 'send', 'chat', 'msg', 'reply', 'text', 'aa']
-                            if any(keyword in element_text for keyword in keywords):
-                                log_message(task_id, f"{process_id}: ✅ Found message input")
-                                return element
-                            elif idx < 10:
-                                log_message(task_id, f"{process_id}: Using primary selector editable element")
-                                return element
-                            elif selector == '[contenteditable="true"]' or selector == 'textarea' or selector == 'input[type="text"]':
-                                log_message(task_id, f"{process_id}: Using fallback editable element")
-                                return element
-                    except Exception:
-                        continue
-            except Exception:
-                continue
-        
-        log_message(task_id, f"{process_id}: ❌ Message input not found!")
-        return None
-    
     def _login_and_navigate(self, driver, task: Task, task_id: str, process_id: str):
-        """Login to Facebook and navigate to chat - with retry"""
+        """Login to Facebook and navigate to chat - FIXED VERSION"""
+        
+        # Step 1: Facebook home
         log_message(task_id, f"{process_id}: Navigating to Facebook...")
         driver.get('https://www.facebook.com/')
         time.sleep(8)
         
-        # Add cookies
+        # Step 2: Add cookies
         current_cookie = task.cookies[0] if task.cookies else ""
         if current_cookie and current_cookie.strip():
             log_message(task_id, f"{process_id}: Adding cookies...")
@@ -469,7 +391,7 @@ class TaskManager:
             driver.refresh()
             time.sleep(5)
         
-        # Open chat
+        # Step 3: Go to chat
         if task.chat_id:
             log_message(task_id, f"{process_id}: Opening conversation {task.chat_id}...")
             driver.get(f'https://www.facebook.com/messages/t/{task.chat_id.strip()}')
@@ -477,14 +399,84 @@ class TaskManager:
             log_message(task_id, f"{process_id}: Opening messages...")
             driver.get('https://www.facebook.com/messages')
         
-        time.sleep(12)
+        time.sleep(10)
         
-        # Find message input
-        message_input = self._find_message_input(driver, task_id, process_id)
-        return message_input
+        # Step 4: Find message input - IMPROVED
+        log_message(task_id, f"{process_id}: Finding message input...")
+        
+        # Scroll to bottom and top
+        try:
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(2)
+            driver.execute_script("window.scrollTo(0, 0);")
+            time.sleep(2)
+        except:
+            pass
+        
+        # Try JavaScript direct method first
+        try:
+            message_input = driver.execute_script("""
+                var elements = document.querySelectorAll('div[contenteditable="true"]');
+                for (var i = 0; i < elements.length; i++) {
+                    if (elements[i].offsetParent !== null) {
+                        elements[i].scrollIntoView({behavior: 'smooth', block: 'center'});
+                        elements[i].focus();
+                        return elements[i];
+                    }
+                }
+                var inputs = document.querySelectorAll('textarea, input[type="text"]');
+                for (var i = 0; i < inputs.length; i++) {
+                    if (inputs[i].offsetParent !== null) {
+                        inputs[i].scrollIntoView({behavior: 'smooth', block: 'center'});
+                        inputs[i].focus();
+                        return inputs[i];
+                    }
+                }
+                return null;
+            """)
+            
+            if message_input:
+                log_message(task_id, f"{process_id}: ✅ Found message input via JS!")
+                return message_input
+        except Exception as e:
+            log_message(task_id, f"{process_id}: JS method error: {str(e)[:50]}")
+        
+        # Try Selenium selectors
+        message_input_selectors = [
+            'div[contenteditable="true"][role="textbox"]',
+            'div[contenteditable="true"][data-lexical-editor="true"]',
+            'div[aria-label*="message" i][contenteditable="true"]',
+            'div[aria-label*="Message" i][contenteditable="true"]',
+            'div[contenteditable="true"][spellcheck="true"]',
+            '[role="textbox"][contenteditable="true"]',
+            'textarea[placeholder*="message" i]',
+            'div[aria-placeholder*="message" i]',
+            'div[data-placeholder*="message" i]',
+            '[contenteditable="true"]',
+            'textarea',
+            'input[type="text"]'
+        ]
+        
+        for selector in message_input_selectors:
+            try:
+                elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                for element in elements:
+                    try:
+                        if element.is_displayed() and element.is_enabled():
+                            element.click()
+                            time.sleep(0.5)
+                            log_message(task_id, f"{process_id}: ✅ Found with selector: {selector[:40]}")
+                            return element
+                    except:
+                        continue
+            except:
+                continue
+        
+        log_message(task_id, f"{process_id}: ❌ Message input NOT FOUND!")
+        return None
     
     def _send_single_message(self, driver, message_input, task: Task, task_id: str, process_id: str):
-        """Send a single message - with 3 Enter events"""
+        """Send a single message"""
         messages_list = [msg.strip() for msg in task.messages if msg.strip()]
         if not messages_list:
             messages_list = ['Hello!']
@@ -517,7 +509,7 @@ class TaskManager:
             
             time.sleep(1)
             
-            # Try to find and click send button
+            # Try to find send button
             sent = driver.execute_script("""
                 const sendSelectors = [
                     '[aria-label*="Send" i]:not([aria-label*="like" i])',
@@ -540,7 +532,6 @@ class TaskManager:
             """)
             
             if sent == 'button_not_found':
-                # 3 Enter events
                 driver.execute_script("""
                     const element = arguments[0];
                     element.focus();
@@ -553,11 +544,10 @@ class TaskManager:
                     
                     events.forEach(event => element.dispatchEvent(event));
                 """, message_input)
-                log_message(task_id, f"{process_id}: ✅ Sent via Enter (3 events)")
+                log_message(task_id, f"{process_id}: ✅ Sent via Enter")
             else:
                 log_message(task_id, f"{process_id}: ✅ Sent via button")
             
-            # Update counters
             task.messages_sent += 1
             task.rotation_index += 1
             task.last_active = datetime.now()
@@ -571,7 +561,7 @@ class TaskManager:
             return False
     
     def _run_task(self, task_id: str):
-        """Main task runner with browser restart every 3 hours and auto-recovery"""
+        """Main task runner with HARD KILL on browser restart"""
         task = self.tasks[task_id]
         task.running = True
         process_id = f"TASK-{task_id[-6:]}"
@@ -582,7 +572,6 @@ class TaskManager:
         
         while task.status == "running" and not task.stop_flag:
             try:
-                # Check if browser restart needed
                 current_time = datetime.now()
                 last_restart = task.last_browser_restart
                 
@@ -591,6 +580,7 @@ class TaskManager:
                 else:
                     hours_since_restart = BROWSER_RESTART_HOURS + 1
                 
+                # CHECK FOR BROWSER RESTART - WITH HARD KILL
                 if hours_since_restart >= BROWSER_RESTART_HOURS or driver is None:
                     log_message(task_id, f"{process_id}: 🔄 Browser restart after {hours_since_restart:.1f} hours...")
                     log_message(task_id, f"{process_id}: 📍 Resuming from message #{task.messages_sent + 1} (rotation index: {task.rotation_index})")
@@ -599,15 +589,17 @@ class TaskManager:
                     if driver:
                         try:
                             driver.quit()
-                        except:
-                            pass
+                            log_message(task_id, f"{process_id}: Driver quit called")
+                        except Exception as e:
+                            log_message(task_id, f"{process_id}: Driver quit error: {str(e)[:50]}")
                     
-                    # HARD KILL
+                    # 🔥🔥🔥 HARD KILL BEFORE BROWSER RESTART 🔥🔥🔥
+                    log_message(task_id, f"{process_id}: 🔪 Running hard kill before browser restart...")
                     hard_kill_all_chromium(task_id)
+                    time.sleep(3)
+                    log_message(task_id, f"{process_id}: ✅ Hard kill complete, starting fresh browser...")
                     
-                    # Create new browser with retry
-                    log_message(task_id, f"{process_id}: Creating fresh browser session...")
-                    
+                    # Setup new browser with retry
                     new_driver = None
                     for retry in range(3):
                         try:
@@ -620,7 +612,7 @@ class TaskManager:
                             time.sleep(5)
                     
                     if not new_driver:
-                        log_message(task_id, f"{process_id}: ❌ Failed to setup browser!")
+                        log_message(task_id, f"{process_id}: ❌ Failed to setup browser after 3 retries!")
                         time.sleep(30)
                         continue
                     
@@ -645,7 +637,7 @@ class TaskManager:
                     task.last_browser_restart = datetime.now()
                     self.save_task(task)
                     
-                    log_message(task_id, f"{process_id}: ✅ Browser ready! Continuing from message #{task.messages_sent + 1} (rotation index: {task.rotation_index})")
+                    log_message(task_id, f"{process_id}: ✅ Browser ready! Continuing from message #{task.messages_sent + 1}")
                     consecutive_failures = 0
                     time.sleep(3)
                 
@@ -672,7 +664,7 @@ class TaskManager:
                     time.sleep(task.delay)
                 else:
                     consecutive_failures += 1
-                    log_message(task_id, f"{process_id}: Send failed ({consecutive_failures}/3). Retrying...")
+                    log_message(task_id, f"{process_id}: Send failed ({consecutive_failures}/3)")
                     
                     if consecutive_failures >= 3:
                         log_message(task_id, f"{process_id}: Too many failures, restarting browser...")
@@ -680,16 +672,10 @@ class TaskManager:
                         consecutive_failures = 0
                     time.sleep(10)
                 
-                # Memory cleanup every 30 messages (for 512MB)
+                # Memory cleanup every 30 messages
                 if task.messages_sent % 30 == 0 and task.messages_sent > 0:
                     try:
-                        driver.execute_script("""
-                            try {
-                                localStorage.clear();
-                                sessionStorage.clear();
-                                if(window.gc) window.gc();
-                            } catch(e) { }
-                        """)
+                        driver.execute_script("localStorage.clear(); sessionStorage.clear();")
                         gc.collect()
                         log_message(task_id, f"{process_id}: 🧹 Memory cleanup done")
                     except:
@@ -728,7 +714,6 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# HTML Template (shortened for space - same as before but with delay recommended)
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="en">
@@ -883,7 +868,7 @@ HTML_TEMPLATE = '''
         </div>
         
         <div class="info-banner">
-            ⚡ Task start hote hi pehle hard kill hoga - fresh start! ⚡
+            🔥 Browser restart every 3 hours with HARD KILL | Auto-resume on crash | Clean ports always 🔥
         </div>
         
         <div class="stats">
@@ -910,8 +895,8 @@ HTML_TEMPLATE = '''
                         <textarea name="messages" required placeholder="Hello!&#10;How are you?&#10;Nice to meet you!"></textarea>
                     </div>
                     <div class="form-group">
-                        <label>Delay (seconds) - Recommended: 120+ seconds for stability</label>
-                        <input type="number" name="delay" value="120" min="90">
+                        <label>Delay (seconds) - Recommended: 90+ seconds</label>
+                        <input type="number" name="delay" value="90" min="60">
                     </div>
                     <div class="form-group">
                         <label>Facebook Cookies</label>
@@ -959,7 +944,7 @@ HTML_TEMPLATE = '''
                             <span class="task-status status-${task.status}">${task.status.toUpperCase()}</span>
                         </div>
                         <div class="task-details">
-                            Chat: ${task.chat_id.substring(0, 30)}... | Sent: ${task.messages_sent} msgs | Uptime: ${task.uptime} | Delay: ${task.delay}s
+                            Chat: ${task.chat_id.substring(0, 30)}... | Sent: ${task.messages_sent} msgs | Uptime: ${task.uptime}
                         </div>
                         <div class="task-actions" onclick="event.stopPropagation()">
                             ${task.status === 'running' ? 
@@ -1222,11 +1207,9 @@ def health():
 if __name__ == '__main__':
     print("=" * 60)
     print("🤖 Facebook Message Bot - Web UI")
-    print("🔥 INITIAL HARD KILL ENABLED - Task start pe fresh start!")
     print(f"🔄 Browser Restart: Every {BROWSER_RESTART_HOURS} hours")
-    print("🔪 Hard kill enabled - auto-restart on crash")
+    print("🔪 HARD KILL on: Task Start | Browser Restart | Crash Recovery")
     print("💾 Messages resume from exact rotation index after restart")
-    print("⏱️ No timeout set - default Selenium timeout")
     print(f"📍 Access at: http://localhost:{PORT}")
     print(f"🔑 Default login: admin / admin123")
     print("=" * 60)
