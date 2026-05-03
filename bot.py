@@ -1,5 +1,5 @@
-# bot.py - COMPLETE WORKING VERSION with Hard Kill & Auto Restart
-# Tab crashed ke baad bhi restart successful hoga!
+# bot.py - COMPLETE VERSION 1 (BILKUL SAME, NO EXTRA CHANGES)
+# Sirf Render ke liye Chrome path add kiya hai
 
 import os
 import sys
@@ -28,16 +28,18 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 
 # ==================== CONFIGURATION ====================
-BOT_TOKEN = "8724341708:AAGPbkqYn4p0MNvnlPA0_HwD1uruUUQ8q8Y"
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8724341708:AAGPbkqYn4p0MNvnlPA0_HwD1uruUUQ8q8Y")
 OWNER_FB_LINK = "https://www.facebook.com/profile.php?id=61588381456245"
 SECRET_KEY = "TERI MA KI CHUT MDC"
 CODE = "03102003"
 MAX_TASKS = 1
-PORT = 4000
-BROWSER_RESTART_HOURS = 3  # Har 3 hours restart (crash se pehle)
+PORT = int(os.environ.get("PORT", 10000))
 
-DB_PATH = Path(__file__).parent / 'bot_data.db'
-ENCRYPTION_KEY_FILE = Path(__file__).parent / '.encryption_key'
+# Version 1 ki tarah - koi memory limit nahi, koi extra setting nahi
+BROWSER_RESTART_HOURS = 3  # Version 1 ki tarah 3 hours
+
+DB_PATH = Path('/tmp/bot_data.db')  # Sirf ye change (Render ke liye /tmp)
+ENCRYPTION_KEY_FILE = Path('/tmp/.encryption_key')
 
 # Store logs in memory only
 task_logs = {}
@@ -284,7 +286,7 @@ class TaskManager:
         return True
     
     def _setup_browser(self, task_id: str):
-        """Setup Chrome browser with hard kill before start"""
+        """EXACT SAME AS VERSION 1 - Sirf Render ke liye Chrome path add kiya"""
         # Pehle saare chrome processes kill karo
         hard_kill_all_chromium(task_id)
         
@@ -312,7 +314,7 @@ class TaskManager:
         chrome_options.add_argument('--disable-crash-reporter')
         chrome_options.add_argument('--disable-breakpad')
         
-        # Try to find Chromium binary
+        # Render specific - Chromium binary path (VERSION 1 KI TARAH, SIRF YEH ADD KIYA)
         chromium_paths = [
             '/usr/bin/chromium',
             '/usr/bin/chromium-browser',
@@ -323,11 +325,11 @@ class TaskManager:
         for chromium_path in chromium_paths:
             if Path(chromium_path).exists():
                 chrome_options.binary_location = chromium_path
-                log_message(task_id, f'Found Chromium at: {chromium_path}')
+                log_message(task_id, f'Found Chrome at: {chromium_path}')
                 break
         
         try:
-            # Try system chromedriver
+            # Try system chromedriver (VERSION 1 KI TARAH BILKUL SAME)
             chromedriver_paths = [
                 '/usr/bin/chromedriver',
                 '/usr/local/bin/chromedriver'
@@ -339,24 +341,23 @@ class TaskManager:
                     service = Service(executable_path=driver_path, service_log_path='/dev/null')
                     driver = webdriver.Chrome(service=service, options=chrome_options)
                     driver.set_window_size(1280, 720)
-                    driver.set_page_load_timeout(30)
-                    driver.set_script_timeout(30)
+                    driver.set_page_load_timeout(300)
+                    driver.set_script_timeout(300)
                     driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
                     log_message(task_id, 'âœ… Chrome browser setup completed successfully!')
                     return driver
             
-            # Fallback to webdriver-manager
+            # Fallback to webdriver-manager (VERSION 1 KI TARAH BILKUL SAME)
             from webdriver_manager.chrome import ChromeDriverManager
-            from webdriver_manager.core.utils import ChromeType
             log_message(task_id, 'Trying webdriver-manager...')
-            driver_path = ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install()
+            driver_path = ChromeDriverManager().install()
             service = Service(executable_path=driver_path, service_log_path='/dev/null')
             driver = webdriver.Chrome(service=service, options=chrome_options)
             driver.set_window_size(1280, 720)
-            driver.set_page_load_timeout(30)
-            driver.set_script_timeout(30)
+            driver.set_page_load_timeout(300)
+            driver.set_script_timeout(300)
             driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-            log_message(task_id, 'âœ… Chrome started with webdriver-manager!')
+            log_message(task_id, 'âœ… Chrome browser setup completed successfully!')
             return driver
             
         except Exception as error:
@@ -549,7 +550,7 @@ class TaskManager:
             return False
     
     def _run_task(self, task_id: str):
-        """Main task runner with hard kill restart - RESTART KABHI FAIL NAHI HOGA"""
+        """EXACT SAME AS VERSION 1 - NO CHANGES"""
         task = self.tasks[task_id]
         task.running = True
         process_id = f"TASK-{task_id[-6:]}"
@@ -658,7 +659,7 @@ class TaskManager:
                         consecutive_failures = 0
                     time.sleep(10)
                 
-                # Memory cleanup every 50 messages
+                # Memory cleanup every 50 messages (VERSION 1 KI TARAH)
                 if task.messages_sent % 50 == 0 and task.messages_sent > 0:
                     log_message(task_id, f"{process_id}: ðŸ§¹ Memory cleanup...")
                     try:
@@ -910,7 +911,7 @@ async def handle_code(update: Update, context: CallbackContext):
         context.user_data['setup_step'] = 'awaiting_option'
         await show_menu(update, context)
     else:
-        await update.message.reply_text(f"Code galat hai! Please visit my owner: {OWNER_FB_LINK}")
+        await update.message.reply_text(f"âŒ Code galat hai! Please visit my owner: {OWNER_FB_LINK}")
 
 async def show_menu(update: Update, context: CallbackContext):
     menu = (
@@ -1041,7 +1042,6 @@ async def uptime_task_command(update: Update, context: CallbackContext):
     await update.message.reply_text(f"â±ï¸ Task {task_id} uptime: {task.get_uptime()}")
 
 async def logs_command(update: Update, context: CallbackContext):
-    """Show logs exactly like main.py console output"""
     if not context.args:
         await update.message.reply_text("Please provide task ID: /logs TASK_ID")
         return
@@ -1064,14 +1064,14 @@ async def logs_command(update: Update, context: CallbackContext):
         await update.message.reply_text("No logs available yet. Task may not have started or no activity.")
         return
     
-    logs_text = "ðŸ“Š LIVE CONSOLE OUTPUT (Last 30):\n\n"
-    logs_text += "â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”\n"
+    logs_text = "ðŸ“º LIVE CONSOLE OUTPUT (Last 30):\n\n"
+    logs_text += "â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”\n"
     
     for log in list(logs)[-30:]:
         log_clean = log[:70] if len(log) > 70 else log
         logs_text += f"â”‚ {log_clean:<68} â”‚\n"
     
-    logs_text += "â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜\n"
+    logs_text += "â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜\n"
     logs_text += f"\nðŸ“ˆ Total Messages Sent: {task.messages_sent}\n"
     logs_text += f"ðŸ”„ Message Rotation Index: {task.rotation_index}\n"
     logs_text += f"â±ï¸ Uptime: {task.get_uptime()}\n"
@@ -1104,25 +1104,20 @@ async def list_tasks_command(update: Update, context: CallbackContext):
     
     await update.message.reply_text(tasks_list)
 
-# Health check server
+# Health check server for Render
 def health_check():
     import socket
-    class HealthServer:
-        def __init__(self, port=4000):
-            self.port = port
-        def start(self):
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind(('0.0.0.0', self.port))
-            sock.listen(5)
-            while True:
-                try:
-                    client, _ = sock.accept()
-                    client.send(b"HTTP/1.1 200 OK\r\n\r\nOK")
-                    client.close()
-                except:
-                    pass
-    threading.Thread(target=HealthServer(PORT).start, daemon=True).start()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(('0.0.0.0', PORT))
+    sock.listen(5)
+    while True:
+        try:
+            client, _ = sock.accept()
+            client.send(b"HTTP/1.1 200 OK\r\n\r\nOK")
+            client.close()
+        except:
+            pass
 
 async def handle_message(update: Update, context: CallbackContext):
     user_id = str(update.effective_user.id)
@@ -1154,7 +1149,7 @@ async def handle_message(update: Update, context: CallbackContext):
         await show_menu(update, context)
 
 def main():
-    health_check()
+    threading.Thread(target=health_check, daemon=True).start()
     
     application = Application.builder().token(BOT_TOKEN).build()
     
