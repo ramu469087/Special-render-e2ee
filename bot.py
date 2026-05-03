@@ -335,7 +335,7 @@ class TaskManager:
         try:
             # Try webdriver-manager (works on Render)
             from webdriver_manager.chrome import ChromeDriverManager
-            from webdriver_manager.core.utils import ChromeType
+            
             
             log_message(task_id, 'Setting up Chrome driver...')
             driver_path = ChromeDriverManager(chrome_type=ChromeType.GOOGLE).install()
