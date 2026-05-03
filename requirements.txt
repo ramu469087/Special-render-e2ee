@@ -1,0 +1,6 @@
+python-telegram-bot
+selenium
+cryptography
+webdriver-manager
+urllib3
+requests
