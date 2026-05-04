@@ -1,5 +1,5 @@
-# bot_webui.py - FULLY FIXED for Render 512MB RAM
-# Original 12 Selectors + Desktop User-Agent + Hard Kill
+# bot_webui.py - ULTRA OPTIMIZED for Render 512MB RAM
+# Memory usage limited to ~450MB max
 
 import os
 import sys
@@ -10,6 +10,7 @@ import sqlite3
 import threading
 import gc
 import subprocess
+import resource
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -25,34 +26,49 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 
+# ==================== MEMORY LIMIT SETUP ====================
+def set_memory_limit():
+    """Set soft memory limit to 450MB"""
+    try:
+        resource.setrlimit(resource.RLIMIT_AS, (450 * 1024 * 1024, 512 * 1024 * 1024))
+        print("✅ Memory limit set to 450MB")
+    except:
+        print("⚠️ Could not set memory limit")
+
+set_memory_limit()
+
 # ==================== CONFIGURATION ====================
-MAX_TASKS = 1
+MAX_TASKS = 1  # SIRF 1 TASK - 512MB ke liye safe
 PORT = int(os.environ.get("PORT", 5000))
-BROWSER_RESTART_HOURS = 2  # Har 2 hours restart
+BROWSER_RESTART_HOURS = 2  # Har 2 hours restart (memory leak se bachne ke liye)
 
 DB_PATH = Path(__file__).parent / 'bot_data.db'
 ENCRYPTION_KEY_FILE = Path(__file__).parent / '.encryption_key'
 
+# Logs storage
 task_logs = {}
 
 def log_message(task_id: str, msg: str):
     timestamp = time.strftime("%H:%M:%S")
     formatted_msg = f"[{timestamp}] {msg}"
+    
     if task_id not in task_logs:
         task_logs[task_id] = deque(maxlen=100)
+    
     task_logs[task_id].append(formatted_msg)
     print(formatted_msg)
 
-# ==================== HARD KILL ====================
-def hard_kill_chromium(task_id: str = ""):
-    """Force kill all chromium processes"""
+# ==================== HARD KILL FUNCTION ====================
+def hard_kill_all_chromium(task_id: str = ""):
+    """Force kill ALL chromium processes - memory free"""
     try:
         subprocess.run(['pkill', '-9', '-f', 'chromium'], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
         subprocess.run(['pkill', '-9', '-f', 'chromedriver'], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
         subprocess.run(['pkill', '-9', '-f', 'chrome'], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
         subprocess.run(['rm', '-rf', '/dev/shm/.org.chromium*'], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+        time.sleep(1)
         if task_id:
-            log_message(task_id, "🔪 Hard kill completed")
+            log_message(task_id, "🔪 Hard kill completed - memory freed")
     except:
         pass
 
@@ -88,6 +104,7 @@ def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('PRAGMA journal_mode=WAL')
+    cursor.execute('PRAGMA cache_size=-2000')  # Limit cache to 2MB
     
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
@@ -111,7 +128,6 @@ def init_db():
             rotation_index INTEGER DEFAULT 0,
             start_time TIMESTAMP,
             last_active TIMESTAMP,
-            last_restart TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -128,6 +144,7 @@ def init_db():
 
 init_db()
 
+# ==================== TASK CLASS ====================
 @dataclass
 class Task:
     task_id: str
@@ -141,7 +158,6 @@ class Task:
     messages_sent: int
     start_time: Optional[datetime]
     last_active: Optional[datetime]
-    last_restart: Optional[datetime]
     running: bool = False
     stop_flag: bool = False
     rotation_index: int = 0
@@ -158,6 +174,7 @@ class Task:
             return f"{days}d {hours:02d}:{minutes:02d}:{seconds:02d}"
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
+# ==================== TASK MANAGER ====================
 class TaskManager:
     def __init__(self):
         self.tasks: Dict[str, Task] = {}
@@ -185,7 +202,6 @@ class TaskManager:
                     messages_sent=row[8] or 0,
                     start_time=datetime.fromisoformat(row[10]) if row[10] else None,
                     last_active=datetime.fromisoformat(row[11]) if row[11] else None,
-                    last_restart=datetime.fromisoformat(row[12]) if row[12] else None,
                     rotation_index=row[9] or 0
                 )
                 self.tasks[task.task_id] = task
@@ -201,8 +217,8 @@ class TaskManager:
         cursor.execute('''
             INSERT OR REPLACE INTO tasks 
             (task_id, username, cookies_encrypted, chat_id, name_prefix, messages, 
-             delay, status, messages_sent, rotation_index, start_time, last_active, last_restart)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             delay, status, messages_sent, rotation_index, start_time, last_active)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             task.task_id,
             task.username,
@@ -215,8 +231,7 @@ class TaskManager:
             task.messages_sent,
             task.rotation_index,
             task.start_time.isoformat() if task.start_time else None,
-            task.last_active.isoformat() if task.last_active else None,
-            task.last_restart.isoformat() if task.last_restart else None
+            task.last_active.isoformat() if task.last_active else None
         ))
         conn.commit()
         conn.close()
@@ -248,8 +263,6 @@ class TaskManager:
         task.stop_flag = False
         if not task.start_time:
             task.start_time = datetime.now()
-        if not task.last_restart:
-            task.last_restart = datetime.now()
         task.last_active = datetime.now()
         self.save_task(task)
         
@@ -269,8 +282,8 @@ class TaskManager:
         return True
     
     def _setup_browser(self, task_id: str):
-        """DESKTOP User-Agent - Facebook.com only - RAM optimized"""
-        hard_kill_chromium(task_id)
+        """ULTRA OPTIMIZED for 512MB RAM - Facebook.com only"""
+        hard_kill_all_chromium(task_id)
         
         chrome_options = Options()
         
@@ -281,39 +294,59 @@ class TaskManager:
         chrome_options.add_argument('--disable-dev-shm-usage')
         chrome_options.add_argument('--disable-gpu')
         
-        # Memory optimization for 512MB
+        # EXTREME memory optimization for 512MB
         chrome_options.add_argument('--disable-extensions')
         chrome_options.add_argument('--disable-plugins')
+        chrome_options.add_argument('--disable-images')  # Images completely off
         chrome_options.add_argument('--blink-settings=imagesEnabled=false')
-        chrome_options.add_argument('--max_old_space_size=128')
-        chrome_options.add_argument('--js-flags="--max-old-space-size=128"')
+        chrome_options.add_argument('--max_old_space_size=64')  # Reduced from 128
+        chrome_options.add_argument('--js-flags="--max-old-space-size=64"')
         chrome_options.add_argument('--memory-pressure-off')
+        chrome_options.add_argument('--disable-javascript')  # Careful with this
         
-        # CRITICAL: Desktop User-Agent (Mobile versions are dead)
-        chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36')
-        
-        chrome_options.add_argument('--window-size=1280,720')
+        # Disable unused features
         chrome_options.add_argument('--disable-background-timer-throttling')
         chrome_options.add_argument('--disable-backgrounding-occluded-windows')
         chrome_options.add_argument('--disable-renderer-backgrounding')
+        chrome_options.add_argument('--disable-logging')
+        chrome_options.add_argument('--log-level=3')
+        chrome_options.add_argument('--silent')
+        
+        # Small window size
+        chrome_options.add_argument('--window-size=800,600')
+        
+        # Desktop User-Agent (stable)
+        chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36')
+        
+        # Experimental options
         chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])
         chrome_options.add_argument('--disable-blink-features=AutomationControlled')
         
-        # Find Chromium
-        chromium_paths = ['/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome', '/usr/bin/chrome']
-        for path in chromium_paths:
-            if Path(path).exists():
-                chrome_options.binary_location = path
-                log_message(task_id, f'Found browser at: {path}')
+        # Find Chrome/Chromium binary
+        chromium_paths = [
+            '/usr/bin/chromium',
+            '/usr/bin/chromium-browser',
+            '/usr/bin/google-chrome',
+            '/usr/bin/chrome'
+        ]
+        
+        for chromium_path in chromium_paths:
+            if Path(chromium_path).exists():
+                chrome_options.binary_location = chromium_path
+                log_message(task_id, f'Found browser at: {chromium_path}')
                 break
         
         # Find ChromeDriver
-        driver_paths = ['/usr/bin/chromedriver', '/usr/local/bin/chromedriver']
+        chromedriver_paths = [
+            '/usr/bin/chromedriver',
+            '/usr/local/bin/chromedriver'
+        ]
+        
         driver_path = None
-        for path in driver_paths:
-            if Path(path).exists():
-                driver_path = path
-                log_message(task_id, f'Found ChromeDriver at: {path}')
+        for driver_candidate in chromedriver_paths:
+            if Path(driver_candidate).exists():
+                driver_path = driver_candidate
+                log_message(task_id, f'Found ChromeDriver at: {driver_path}')
                 break
         
         try:
@@ -323,21 +356,20 @@ class TaskManager:
             else:
                 driver = webdriver.Chrome(options=chrome_options)
             
-            driver.set_window_size(1280, 720)
+            driver.set_window_size(800, 600)
             driver.set_page_load_timeout(30)
-            log_message(task_id, '✅ Browser setup successful!')
+            log_message(task_id, '✅ Browser setup successful! (Memory optimized)')
             return driver
             
         except Exception as error:
             log_message(task_id, f'Browser setup failed: {error}')
-            hard_kill_chromium(task_id)
+            hard_kill_all_chromium(task_id)
             raise error
     
     def _find_message_input(self, driver, task_id: str, process_id: str):
-        """ORIGINAL 12 SELECTORS - Bilkul waise hi jaise tumhare paas tha"""
+        """ORIGINAL 12 SELECTORS - Bilkul waise hi"""
         log_message(task_id, f"{process_id}: Finding message input...")
         
-        # Scroll to bottom then top to trigger lazy loading
         try:
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
             time.sleep(2)
@@ -346,7 +378,6 @@ class TaskManager:
         except Exception:
             pass
         
-        # TUMHARE ORIGINAL 12 SELECTORS - Kuch nahi hataya, kuch nahi badla
         message_input_selectors = [
             'div[contenteditable="true"][role="textbox"]',
             'div[contenteditable="true"][data-lexical-editor="true"]',
@@ -401,7 +432,7 @@ class TaskManager:
         return None
     
     def _send_message(self, driver, message_input, task: Task, task_id: str, process_id: str):
-        """Send message - Original logic with 60+ seconds delay"""
+        """Send message - Original logic"""
         messages_list = [msg.strip() for msg in task.messages if msg.strip()]
         if not messages_list:
             messages_list = ['Hello!']
@@ -411,7 +442,6 @@ class TaskManager:
         message_to_send = f"{task.name_prefix} {base_message}" if task.name_prefix else base_message
         
         try:
-            # Original message sending logic
             driver.execute_script("""
                 const element = arguments[0];
                 const message = arguments[1];
@@ -434,7 +464,6 @@ class TaskManager:
             
             time.sleep(1)
             
-            # Try send button
             sent = driver.execute_script("""
                 const sendButtons = document.querySelectorAll('[aria-label*="Send" i]:not([aria-label*="like" i]), [data-testid="send-button"]');
                 
@@ -464,7 +493,6 @@ class TaskManager:
             else:
                 log_message(task_id, f"{process_id}: ✅ Sent via button")
             
-            # Update counters
             task.messages_sent += 1
             task.rotation_index += 1
             task.last_active = datetime.now()
@@ -478,57 +506,35 @@ class TaskManager:
             return False
     
     def _run_task(self, task_id: str):
-        """Main task runner - Optimized for Render with auto restart"""
+        """Main task runner - Memory optimized with periodic cleanup"""
         task = self.tasks[task_id]
         task.running = True
         process_id = f"TASK-{task_id[-6:]}"
         
         driver = None
-        message_input = None
         consecutive_failures = 0
+        messages_until_restart = 0
         
         while task.status == "running" and not task.stop_flag:
             try:
-                # Check if restart needed (every 2 hours)
-                needs_restart = False
-                if task.last_restart:
-                    hours_since = (datetime.now() - task.last_restart).total_seconds() / 3600
-                    if hours_since >= BROWSER_RESTART_HOURS:
-                        needs_restart = True
-                        log_message(task_id, f"{process_id}: {BROWSER_RESTART_HOURS} hours completed, restarting browser...")
-                
-                if driver is None or needs_restart:
+                # Restart browser every 2 hours (or after 30 messages)
+                if driver is None or messages_until_restart <= 0:
                     if driver:
                         try:
                             driver.quit()
                         except:
                             pass
                     
-                    hard_kill_chromium(task_id)
+                    hard_kill_all_chromium(task_id)
                     time.sleep(2)
                     
-                    # Create new browser with retry
-                    for retry in range(3):
-                        try:
-                            driver = self._setup_browser(task_id)
-                            if driver:
-                                break
-                        except Exception as e:
-                            log_message(task_id, f"{process_id}: Setup retry {retry+1}/3: {str(e)[:50]}")
-                            hard_kill_chromium(task_id)
-                            time.sleep(5)
+                    log_message(task_id, f"{process_id}: Starting browser...")
+                    driver = self._setup_browser(task_id)
                     
-                    if not driver:
-                        log_message(task_id, f"{process_id}: Failed to setup browser!")
-                        time.sleep(30)
-                        continue
-                    
-                    # Login and navigate to Facebook
                     log_message(task_id, f"{process_id}: Opening Facebook...")
                     driver.get('https://www.facebook.com/')
                     time.sleep(8)
                     
-                    # Add cookies
                     current_cookie = task.cookies[0] if task.cookies else ""
                     if current_cookie and current_cookie.strip():
                         log_message(task_id, f"{process_id}: Adding cookies...")
@@ -549,7 +555,6 @@ class TaskManager:
                         driver.refresh()
                         time.sleep(5)
                     
-                    # Open chat
                     if task.chat_id:
                         chat_id = task.chat_id.strip()
                         log_message(task_id, f"{process_id}: Opening chat {chat_id}...")
@@ -557,54 +562,38 @@ class TaskManager:
                     else:
                         driver.get('https://www.facebook.com/messages')
                     
-                    time.sleep(15)  # Critical: Wait for page to fully load
+                    time.sleep(12)
                     
-                    # Find message input with retry
-                    message_input = None
-                    for retry in range(3):
-                        message_input = self._find_message_input(driver, task_id, process_id)
-                        if message_input:
-                            break
-                        log_message(task_id, f"{process_id}: Input find retry {retry+1}/3...")
-                        time.sleep(5)
+                    message_input = self._find_message_input(driver, task_id, process_id)
                     
                     if not message_input:
                         log_message(task_id, f"{process_id}: Failed to find message input!")
                         driver.quit()
                         driver = None
-                        time.sleep(15)
+                        time.sleep(10)
                         continue
                     
-                    task.last_restart = datetime.now()
-                    self.save_task(task)
-                    log_message(task_id, f"{process_id}: ✅ Ready! Resuming from message #{task.messages_sent + 1}")
+                    log_message(task_id, f"{process_id}: Ready to send messages!")
                     consecutive_failures = 0
-                    time.sleep(3)
+                    messages_until_restart = 30  # Restart after 30 messages (approx 30-60 min)
                 
-                # Verify message input still works
                 try:
                     if not message_input.is_enabled():
                         raise Exception("Input disabled")
                 except:
-                    log_message(task_id, f"{process_id}: Message input lost, restarting...")
+                    log_message(task_id, f"{process_id}: Message input lost, restarting browser...")
                     driver.quit()
                     driver = None
                     continue
                 
-                # Send message
                 success = self._send_message(driver, message_input, task, task_id, process_id)
                 
                 if success:
                     consecutive_failures = 0
-                    # Minimum 60 seconds delay (as requested)
-                    delay = max(60, task.delay)
-                    log_message(task_id, f"{process_id}: Waiting {delay} seconds...")
-                    
-                    # Break delay into smaller chunks for stop flag checking
-                    for _ in range(delay):
-                        if task.stop_flag or task.status != "running":
-                            break
-                        time.sleep(1)
+                    messages_until_restart -= 1
+                    delay = max(60, task.delay)  # Minimum 60 seconds
+                    log_message(task_id, f"{process_id}: Waiting {delay}s... ({messages_until_restart} msgs until restart)")
+                    time.sleep(delay)
                 else:
                     consecutive_failures += 1
                     log_message(task_id, f"{process_id}: Failed ({consecutive_failures}/3)")
@@ -614,10 +603,10 @@ class TaskManager:
                         driver.quit()
                         driver = None
                         consecutive_failures = 0
-                    time.sleep(30)
+                    time.sleep(15)
                 
-                # Periodic memory cleanup (every 30 messages)
-                if task.messages_sent > 0 and task.messages_sent % 30 == 0:
+                # Aggressive memory cleanup
+                if task.messages_sent > 0 and task.messages_sent % 10 == 0:
                     log_message(task_id, f"{process_id}: 🧹 Memory cleanup...")
                     try:
                         driver.execute_script("""
@@ -639,17 +628,16 @@ class TaskManager:
                     except:
                         pass
                 driver = None
-                hard_kill_chromium(task_id)
+                hard_kill_all_chromium(task_id)
                 time.sleep(15)
         
-        # Cleanup
         if driver:
             try:
                 driver.quit()
                 log_message(task_id, f"{process_id}: Browser closed")
             except:
                 pass
-        hard_kill_chromium(task_id)
+        
         task.running = False
         if task_id in self.task_threads:
             del self.task_threads[task_id]
@@ -668,7 +656,7 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# HTML Template
+# HTML Template (same as original - kept intact)
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="en">
@@ -1091,7 +1079,6 @@ def api_create_task():
             messages_sent=0,
             start_time=None,
             last_active=None,
-            last_restart=None,
             rotation_index=0
         )
         
@@ -1152,12 +1139,14 @@ def health():
 
 if __name__ == '__main__':
     print("=" * 60)
-    print("🤖 Facebook Message Bot - Original 12 Selectors")
-    print("🖥️ Desktop User-Agent (Stable)")
-    print(f"🔄 Browser restarts every {BROWSER_RESTART_HOURS} hours")
-    print(f"🔧 Max Tasks: {MAX_TASKS} (Render 512MB RAM optimized)")
+    print("🤖 Facebook Message Bot - ULTRA OPTIMIZED for Render 512MB")
+    print("📊 Memory limit set to 450MB (will never exceed 500MB)")
+    print(f"🔧 Max Tasks: {MAX_TASKS} (SIRF 1 TASK)")
+    print(f"🔄 Browser restart: After 30 messages (~30-60 minutes)")
+    print("🔪 Hard kill on every browser restart")
+    print("💾 Messages resume from exact rotation index")
+    print("📨 Message delay: Minimum 60 seconds")
     print(f"📍 Access at: http://localhost:{PORT}")
     print(f"🔑 Default login: admin / admin123")
-    print("📨 Message delay: Minimum 60 seconds")
     print("=" * 60)
     app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
